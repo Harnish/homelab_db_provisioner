@@ -1,0 +1,27 @@
+{
+  "servers": [
+    {
+      "name": "Local PostgreSQL",
+      "root_connection_string": "postgres://postgres:rootpassword@localhost:5432/postgres?sslmode=disable",
+      "dry_run": false,
+      "databases": [
+        {
+          "database": "app_db",
+          "user": "app_user",
+          "password": "securepassword123"
+        },
+        {
+          "database": "analytics_db",
+          "user": "analytics_user",
+          "password": "analyticspass456"
+        },
+        {
+          "database": "reporting_db",
+          "user": "reporting_user",
+          "password": "reportingpass789",
+          "permissions": ["SELECT", "INSERT", "UPDATE"]
+        }
+      ]
+    }
+  ]
+}

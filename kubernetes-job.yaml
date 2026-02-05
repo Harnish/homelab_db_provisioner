@@ -1,0 +1,80 @@
+---
+# PostgreSQL and MariaDB Database Provisioner Job
+# This job will run once to provision databases on configured servers
+# Supports both PostgreSQL and MariaDB/MySQL
+#
+# Prerequisites:
+# 1. Build and push the image: docker build -t homelab-db-provisioner:latest .
+# 2. Create ConfigMap with config.json: kubectl create configmap homelab-db-provisioner-config --from-file=config.json
+#
+# Usage:
+# kubectl apply -f kubernetes-job.yaml
+# kubectl logs -f job/homelab-db-provisioner-job
+#
+# For MariaDB support, use connection strings like:
+#   mariadb://root:password@mariadb-service:3306/
+#
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: homelab-db-provisioner-config
+  namespace: default
+data:
+  config.json: |
+    {
+      "servers": [
+        {
+          "name": "PostgreSQL Server",
+          "root_connection_string": "postgres://postgres:rootpassword@postgres-service:5432/postgres?sslmode=disable",
+          "databases": [
+            {
+              "database": "app_db",
+              "user": "app_user",
+              "password": "securepassword123"
+            }
+          ]
+        },
+        {
+          "name": "MariaDB Server",
+          "root_connection_string": "mariadb://root:rootpassword@mariadb-service:3306/",
+          "databases": [
+            {
+              "database": "wordpress_db",
+              "user": "wordpress_user",
+              "password": "wppass123"
+            }
+          ]
+        }
+      ]
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: homelab-db-provisioner-job
+  namespace: default
+spec:
+  template:
+    metadata:
+      labels:
+        app: homelab-db-provisioner
+    spec:
+      containers:
+      - name: provisioner
+        image: homelab-db-provisioner:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CONFIG_PATH
+          value: /config/config.json
+        - name: WATCH_MODE
+          value: "false"  # Run once and exit
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: homelab-db-provisioner-config
+      restartPolicy: OnFailure

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: homelab-db-provisioner-config
+  namespace: default
+data:
+  config.json: |
+    {
+      "root_connection_string": "postgres://postgres:rootpassword@postgres-service:5432/postgres?sslmode=disable",
+      "databases": [
+        {
+          "database": "app_db",
+          "user": "app_user",
+          "password": "securepassword123"
+        }
+      ]
+    }

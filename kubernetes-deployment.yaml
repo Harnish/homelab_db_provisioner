@@ -1,0 +1,63 @@
+---
+# PostgreSQL and MariaDB Database Provisioner Deployment
+# This deployment will run as a long-running pod watching for ConfigMap changes
+# Supports both PostgreSQL and MariaDB/MySQL
+#
+# Prerequisites:
+# 1. Build and push the image: docker build -t homelab-db-provisioner:latest .
+# 2. Create ConfigMap with config.json: kubectl create configmap homelab-db-provisioner-config --from-file=config.json
+#
+# Usage:
+# kubectl apply -f kubernetes-deployment.yaml
+# kubectl logs -f deployment/homelab-db-provisioner
+#
+# For MariaDB support, use connection strings like:
+#   mariadb://root:password@mariadb-service:3306/
+#
+# ConfigMap Format:
+# The configMap should contain a config.json with "servers" array supporting multiple databases:
+#   {
+#     "servers": [
+#       {
+#         "name": "Server Name",
+#         "root_connection_string": "postgres://..." or "mariadb://...",
+#         "databases": [...]
+#       }
+#     ]
+#   }
+#
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homelab-db-provisioner
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: homelab-db-provisioner
+  template:
+    metadata:
+      labels:
+        app: homelab-db-provisioner
+    spec:
+      containers:
+      - name: provisioner
+        image: homelab-db-provisioner:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CONFIG_PATH
+          value: /config/config.json
+        - name: WATCH_MODE
+          value: "true"  # Enable watch mode to detect ConfigMap changes
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: homelab-db-provisioner-config
+      restartPolicy: Always
+

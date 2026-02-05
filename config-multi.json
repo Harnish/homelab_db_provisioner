@@ -1,0 +1,40 @@
+{
+  "servers": [
+    {
+      "name": "Production PostgreSQL",
+      "root_connection_string": "postgres://postgres:rootpassword@postgres:5432/postgres?sslmode=disable",
+      "dry_run": false,
+      "databases": [
+        {
+          "database": "app_db",
+          "user": "app_user",
+          "password": "securepassword123"
+        },
+        {
+          "database": "analytics_db",
+          "user": "analytics_user",
+          "password": "analyticspass456",
+          "permissions": ["SELECT", "INSERT"]
+        }
+      ]
+    },
+    {
+      "name": "Production MariaDB",
+      "root_connection_string": "mariadb://root:rootpassword@mariadb:3306/",
+      "dry_run": false,
+      "databases": [
+        {
+          "database": "wordpress_db",
+          "user": "wordpress_user",
+          "password": "wppass123"
+        },
+        {
+          "database": "app_mariadb",
+          "user": "app_user_db",
+          "password": "appdbpass789",
+          "permissions": ["SELECT", "INSERT", "UPDATE", "DELETE"]
+        }
+      ]
+    }
+  ]
+}
