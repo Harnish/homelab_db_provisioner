@@ -1,6 +1,6 @@
 # PostgreSQL Database Provisioner
 
-A Go-based application that automates PostgreSQL database and user provisioning. It runs in a Docker container and creates databases with dedicated users based on a configuration file.
+A Go-based application that automates PostgreSQL and MariaDB/MySQL database and user provisioning. It runs in a Docker container and creates databases with dedicated users based on a configuration file.  Making it super easy for homelab users to setup the databases.  
 
 ## Features
 
@@ -14,19 +14,6 @@ A Go-based application that automates PostgreSQL database and user provisioning.
 - **Kubernetes native**: Works seamlessly with ConfigMaps
 - **Idempotent**: Safe to run multiple times
 - **Multi-database support**: Works with both PostgreSQL and MariaDB/MySQL
-
-## Project Structure
-
-```
-.
-├── main.go              # Go application
-├── go.mod               # Go module definition
-├── go.sum               # Go dependencies checksum
-├── Dockerfile           # Container definition
-├── docker-compose.yml   # Example deployment
-├── config.json          # Configuration file
-└── README.md           # This file
-```
 
 ## Configuration
 
@@ -145,13 +132,13 @@ This will:
 1. Build the image:
 
 ```bash
-docker build -t homelab-db-provisioner .
+docker build -t pg-provisioner .
 ```
 
 2. Run the container (assuming PostgreSQL is accessible):
 
 ```bash
-docker run -v $(pwd)/config.json:/config/config.json:ro homelab-db-provisioner
+docker run -v $(pwd)/config.json:/config/config.json:ro pg-provisioner
 ```
 
 ### Using Kubernetes with ConfigMaps
@@ -168,7 +155,7 @@ kubectl apply -f kubernetes-deployment.yaml
 
 When you update the ConfigMap:
 ```bash
-kubectl edit configmap homelab-db-provisioner-config
+kubectl edit configmap pg-provisioner-config
 ```
 
 The pod will automatically detect changes within ~10 seconds and reprocess the configuration.
@@ -214,7 +201,7 @@ The container will detect changes within 10 seconds.
 #### Kubernetes
 Update the ConfigMap:
 ```bash
-kubectl edit configmap homelab-db-provisioner-config
+kubectl edit configmap pg-provisioner-config
 # or
 kubectl apply -f updated-config.yaml
 ```
@@ -277,7 +264,7 @@ mariadb://root:mypassword@localhost:3306/
 - **MariaDB/MySQL**:
   - Creates database with UTF8MB4 character set
   - If a user exists: Updates the password
-  - Grants all privileges on the database to the user
+  - Grants all privileges on the database to the user unless specified
   - Automatically flushes privileges after changes
 - Includes connection retry logic (5 attempts with 5-second delays)
 - Automatically detects database type from connection string
