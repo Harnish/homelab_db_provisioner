@@ -205,3 +205,104 @@ func TestUpdatePassword_InvalidDBIndex(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
+
+func TestAddDatabase_Success(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index": {"0"},
+		"database":     {"newdb"},
+		"user":         {"newuser"},
+		"password":     {"newpass"},
+		"permissions":  {"SELECT, INSERT"},
+	}
+	req := httptest.NewRequest("POST", "/add-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Servers[0].Databases) != 2 {
+		t.Fatalf("expected 2 databases, got %d", len(cfg.Servers[0].Databases))
+	}
+	added := cfg.Servers[0].Databases[1]
+	if added.Database != "newdb" || added.User != "newuser" || added.Password != "newpass" {
+		t.Errorf("unexpected database entry: %+v", added)
+	}
+	if len(added.Permissions) != 2 || added.Permissions[0] != "SELECT" || added.Permissions[1] != "INSERT" {
+		t.Errorf("unexpected permissions: %v", added.Permissions)
+	}
+}
+
+func TestAddDatabase_EmptyPermissions(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index": {"0"},
+		"database":     {"newdb"},
+		"user":         {"newuser"},
+		"password":     {"newpass"},
+		"permissions":  {""},
+	}
+	req := httptest.NewRequest("POST", "/add-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	json.Unmarshal(data, &cfg)
+	added := cfg.Servers[0].Databases[1]
+	if len(added.Permissions) != 0 {
+		t.Errorf("expected empty permissions, got %v", added.Permissions)
+	}
+}
+
+func TestAddDatabase_InvalidServerIndex(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	form := url.Values{
+		"server_index": {"99"},
+		"database":     {"newdb"},
+		"user":         {"newuser"},
+		"password":     {"newpass"},
+		"permissions":  {""},
+	}
+	req := httptest.NewRequest("POST", "/add-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
