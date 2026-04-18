@@ -277,7 +277,9 @@ func TestAddDatabase_EmptyPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	var cfg Config
-	json.Unmarshal(data, &cfg)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
 	added := cfg.Servers[0].Databases[1]
 	if len(added.Permissions) != 0 {
 		t.Errorf("expected empty permissions, got %v", added.Permissions)
