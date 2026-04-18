@@ -171,6 +171,10 @@ func handleUpdatePassword(configPath string) http.HandlerFunc {
 			return
 		}
 		newPassword := r.FormValue("new_password")
+		if newPassword == "" {
+			http.Error(w, "new_password is required", http.StatusBadRequest)
+			return
+		}
 
 		configMu.Lock()
 		defer configMu.Unlock()
@@ -200,7 +204,7 @@ func handleUpdatePassword(configPath string) http.HandlerFunc {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
 			return
 		}
-		if err := os.WriteFile(configPath, out, 0644); err != nil {
+		if err := os.WriteFile(configPath, out, 0600); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to write config"), http.StatusSeeOther)
 			return
 		}
@@ -231,6 +235,13 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 			}
 		}
 
+		database := r.FormValue("database")
+		user := r.FormValue("user")
+		if database == "" || user == "" {
+			http.Error(w, "database and user are required", http.StatusBadRequest)
+			return
+		}
+
 		configMu.Lock()
 		defer configMu.Unlock()
 
@@ -250,8 +261,8 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 		}
 
 		cfg.Servers[si].Databases = append(cfg.Servers[si].Databases, DatabaseConfig{
-			Database:    r.FormValue("database"),
-			User:        r.FormValue("user"),
+			Database:    database,
+			User:        user,
 			Password:    r.FormValue("password"),
 			Permissions: permissions,
 		})
@@ -261,7 +272,7 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
 			return
 		}
-		if err := os.WriteFile(configPath, out, 0644); err != nil {
+		if err := os.WriteFile(configPath, out, 0600); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to write config"), http.StatusSeeOther)
 			return
 		}
