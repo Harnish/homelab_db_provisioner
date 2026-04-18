@@ -52,7 +52,15 @@ func detectDBType(connStr string) DBType {
 func main() {
 	log.Println("PostgreSQL Database Provisioner starting...")
 
-	// Check if running in watch mode
+	if os.Getenv("ADMIN_SITE") == "true" {
+		adminUser := os.Getenv("ADMIN_USER")
+		adminPass := os.Getenv("ADMIN_PASSWORD")
+		if adminUser == "" || adminPass == "" {
+			log.Fatal("ADMIN_SITE=true requires ADMIN_USER and ADMIN_PASSWORD to be set")
+		}
+		go startAdminServer(getConfigPath())
+	}
+
 	watchMode := os.Getenv("WATCH_MODE")
 	if watchMode == "true" {
 		runWatchMode()
