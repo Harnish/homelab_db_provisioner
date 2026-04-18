@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -125,5 +127,81 @@ func TestIndex_UnknownPathReturns404(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestUpdatePassword_Success(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index": {"0"},
+		"db_index":     {"0"},
+		"new_password": {"newpassword123"},
+	}
+	req := httptest.NewRequest("POST", "/update-password", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Servers[0].Databases[0].Password != "newpassword123" {
+		t.Errorf("expected password updated in config, got %q", cfg.Servers[0].Databases[0].Password)
+	}
+}
+
+func TestUpdatePassword_InvalidServerIndex(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	form := url.Values{
+		"server_index": {"99"},
+		"db_index":     {"0"},
+		"new_password": {"newpassword"},
+	}
+	req := httptest.NewRequest("POST", "/update-password", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUpdatePassword_InvalidDBIndex(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	form := url.Values{
+		"server_index": {"0"},
+		"db_index":     {"99"},
+		"new_password": {"newpassword"},
+	}
+	req := httptest.NewRequest("POST", "/update-password", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
