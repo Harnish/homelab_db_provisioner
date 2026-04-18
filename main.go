@@ -8,11 +8,14 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 )
+
+var configMu sync.RWMutex
 
 type DatabaseConfig struct {
 	Database    string   `json:"database"`
@@ -59,7 +62,9 @@ func main() {
 }
 
 func runOnce() {
+	configMu.RLock()
 	config, err := loadConfig()
+	configMu.RUnlock()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
@@ -92,7 +97,9 @@ func runWatchMode() {
 			log.Println("Config file changed, reprocessing...")
 			lastModTime = currentModTime
 
+			configMu.RLock()
 			config, err := loadConfig()
+			configMu.RUnlock()
 			if err != nil {
 				log.Printf("Failed to load config: %v", err)
 				time.Sleep(checkInterval)
