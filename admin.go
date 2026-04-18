@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"html/template"
 	"log"
@@ -107,7 +108,11 @@ func startAdminServer(configPath string) {
 func basicAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
-		if !ok || user != os.Getenv("ADMIN_USER") || pass != os.Getenv("ADMIN_PASSWORD") {
+		adminUser := os.Getenv("ADMIN_USER")
+		adminPass := os.Getenv("ADMIN_PASSWORD")
+		userOK := subtle.ConstantTimeCompare([]byte(user), []byte(adminUser)) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(pass), []byte(adminPass)) == 1
+		if !ok || !userOK || !passOK {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Admin"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
@@ -135,11 +140,13 @@ func handleIndex(configPath string) http.HandlerFunc {
 			return
 		}
 		msg := r.URL.Query().Get("msg")
-		adminTemplate.Execute(w, adminTemplateData{
+		if err := adminTemplate.Execute(w, adminTemplateData{
 			Servers:    cfg.Servers,
 			Flash:      msg,
 			FlashError: strings.HasPrefix(msg, "Error:"),
-		})
+		}); err != nil {
+			log.Printf("template execute error: %v", err)
+		}
 	}
 }
 
@@ -149,7 +156,10 @@ func handleUpdatePassword(configPath string) http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		r.ParseForm()
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
 		si, err := strconv.Atoi(r.FormValue("server_index"))
 		if err != nil {
 			http.Error(w, "Invalid server_index", http.StatusBadRequest)
@@ -204,7 +214,10 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		r.ParseForm()
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
 		si, err := strconv.Atoi(r.FormValue("server_index"))
 		if err != nil {
 			http.Error(w, "Invalid server_index", http.StatusBadRequest)
