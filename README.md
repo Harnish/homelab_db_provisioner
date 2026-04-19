@@ -11,6 +11,7 @@ A Go-based application that automates PostgreSQL and MariaDB/MySQL database and 
 - Connection retry logic for reliability
 - Configurable via JSON
 - **Watch mode**: Continuously monitors config file for changes
+- **Admin web UI**: Optional browser-based interface to add databases and change passwords
 - **Kubernetes native**: Works seamlessly with ConfigMaps
 - **Idempotent**: Safe to run multiple times
 - **Multi-database support**: Works with both PostgreSQL and MariaDB/MySQL
@@ -269,12 +270,58 @@ mariadb://root:mypassword@localhost:3306/
 - Includes connection retry logic (5 attempts with 5-second delays)
 - Automatically detects database type from connection string
 
+## Admin Web UI
+
+An optional browser-based interface lets you add new database entries and change passwords without editing the config file manually. Changes are written to disk and picked up automatically when running in watch mode.
+
+### Enabling the Admin UI
+
+Set all three environment variables:
+
+```bash
+ADMIN_SITE=true ADMIN_USER=admin ADMIN_PASSWORD=secret
+```
+
+| Variable | Description |
+|----------|-------------|
+| `ADMIN_SITE` | Set to `true` to enable the admin server |
+| `ADMIN_USER` | Username for HTTP Basic Auth |
+| `ADMIN_PASSWORD` | Password for HTTP Basic Auth |
+| `ADMIN_PORT` | Port to listen on (default: `8080`) |
+
+### Example (Docker)
+
+```bash
+docker run \
+  -e ADMIN_SITE=true \
+  -e ADMIN_USER=admin \
+  -e ADMIN_PASSWORD=secret \
+  -e WATCH_MODE=true \
+  -p 8080:8080 \
+  -v $(pwd)/config.json:/config/config.json \
+  pg-provisioner
+```
+
+Then open `http://localhost:8080` in your browser. You will be prompted for the username and password you set above.
+
+### Features
+
+- View all configured databases across all servers
+- Change the password for any existing database user
+- Add a new database entry to any server (with optional custom permissions)
+
+> **Note:** The admin UI is most useful with `WATCH_MODE=true`. In one-shot mode the process exits after the first run and the UI has no time to apply changes.
+
 ## Environment Variables
 
-- `CONFIG_PATH`: Path to configuration file (default: `/config/config.json`)
-- `WATCH_MODE`: Enable continuous monitoring of config file changes (default: `false`)
-  - `true`: Monitor config file for changes and reprocess automatically
-  - `false`: Run once and exit
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONFIG_PATH` | `/config/config.json` | Path to configuration file |
+| `WATCH_MODE` | `false` | `true` to monitor config file and reprocess on changes |
+| `ADMIN_SITE` | — | Set to `true` to enable the admin web UI |
+| `ADMIN_USER` | — | Basic Auth username for admin UI (required when `ADMIN_SITE=true`) |
+| `ADMIN_PASSWORD` | — | Basic Auth password for admin UI (required when `ADMIN_SITE=true`) |
+| `ADMIN_PORT` | `8080` | Port for the admin web UI |
 
 ## Security Considerations
 
