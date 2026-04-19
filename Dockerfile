@@ -11,7 +11,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code
-COPY main.go ./
+COPY *.go ./
 
 # Build the application with static linking
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a -ldflags '-extldflags "-static"' -o provisioner .
