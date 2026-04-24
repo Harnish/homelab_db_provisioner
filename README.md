@@ -12,6 +12,8 @@ A Go-based application that automates PostgreSQL and MariaDB/MySQL database and 
 - Configurable via JSON
 - **Watch mode**: Continuously monitors config file for changes
 - **Admin web UI**: Optional browser-based interface to add databases and change passwords
+- **Automated backups**: Scheduled daily or weekly `pg_dump`/`mysqldump` backups with configurable retention
+- **Auto-restore**: Optionally restores from the newest backup when a database is first created
 - **Kubernetes native**: Works seamlessly with ConfigMaps
 - **Idempotent**: Safe to run multiple times
 - **Multi-database support**: Works with both PostgreSQL and MariaDB/MySQL
@@ -90,7 +92,7 @@ Create a `config.json` file with your database server configurations. You can ma
 ### Configuration Fields
 
 - `servers`: Array of database server configurations
-  - `name`: Friendly name for the server (used in logs)
+  - `name`: Friendly name for the server (used in logs and backup directory names)
   - `root_connection_string`: Database connection string with superuser credentials
     - PostgreSQL: `postgres://user:pass@host:port/database?sslmode=disable`
     - MariaDB: `mariadb://user:pass@host:port/` or `mysql://user:pass@host:port/`
@@ -98,6 +100,11 @@ Create a `config.json` file with your database server configurations. You can ma
     - `database`: Name of the database to create
     - `user`: Username to create/manage
     - `password`: Password for the user
+    - `backup`: Optional backup configuration (see [Backups](#backups))
+      - `enabled`: `true` to enable scheduled backups
+      - `schedule`: `"daily"` or `"weekly"` (weekly runs on Sundays at midnight)
+      - `keep_count`: Number of backup files to retain (0 = keep all)
+      - `restore_on_create`: `true` to restore from the newest backup when the database is first created
 
 **Note**: The application automatically detects the database type for each server based on the connection string prefix.
 
@@ -311,6 +318,86 @@ Then open `http://localhost:8080` in your browser. You will be prompted for the 
 - Add a new database entry to any server (with optional custom permissions)
 
 > **Note:** The admin UI is most useful with `WATCH_MODE=true`. In one-shot mode the process exits after the first run and the UI has no time to apply changes.
+
+## Backups
+
+The provisioner can automatically back up databases using `pg_dump` (PostgreSQL) or `mysqldump` (MariaDB/MySQL). Backups are compressed with gzip and stored next to the config file.
+
+### Directory Structure
+
+Backups are written to a `backups/` subdirectory alongside `config.json`, organized by server name and database:
+
+```
+backups/
+  production-postgresql/
+    app_db/
+      app_db_2024-01-15.sql.gz
+      app_db_2024-01-16.sql.gz
+    analytics_db/
+      analytics_db_2024-01-15.sql.gz
+  production-mariadb/
+    wordpress_db/
+      wordpress_db_2024-01-15.sql.gz
+```
+
+### Scheduling
+
+- **Daily**: runs at midnight every day
+- **Weekly**: runs at midnight every Sunday
+
+Backups only run while the provisioner is running. Use `WATCH_MODE=true` (or a Kubernetes Deployment) to keep it running long-term.
+
+### Configuration Example
+
+```json
+{
+  "servers": [
+    {
+      "name": "Production PostgreSQL",
+      "root_connection_string": "postgres://postgres:rootpassword@postgres:5432/postgres?sslmode=disable",
+      "databases": [
+        {
+          "database": "app_db",
+          "user": "app_user",
+          "password": "securepassword123",
+          "backup": {
+            "enabled": true,
+            "schedule": "daily",
+            "keep_count": 7,
+            "restore_on_create": true
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Auto-Restore on Create
+
+When `restore_on_create` is `true`, the provisioner will automatically restore the newest available backup into a database the first time it is created. This is useful for:
+
+- Migrating a database to a new server
+- Recreating a database from scratch
+- Spinning up a fresh environment pre-populated with data
+
+The restore is skipped silently if no backup files exist yet.
+
+### Docker: Persisting Backups
+
+Mount a host directory so backups survive container restarts:
+
+```bash
+docker run \
+  -e WATCH_MODE=true \
+  -v $(pwd)/config.json:/config/config.json \
+  -v $(pwd)/backups:/config/backups \
+  pg-provisioner
+```
+
+### Kubernetes: Persisting Backups
+
+Add a PersistentVolumeClaim and mount it at the same path as the config directory so the `backups/` subdirectory is preserved across pod restarts.
 
 ## Environment Variables
 
