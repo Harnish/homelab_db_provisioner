@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -47,11 +50,16 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
         <td>{{$db.User}}</td>
         <td>{{if $db.Permissions}}{{join $db.Permissions ", "}}{{else}}ALL{{end}}</td>
         <td>
-          <form method="POST" action="/update-password">
+          <form method="POST" action="/update-password" style="display:inline-flex;gap:0.25rem;align-items:center;">
             <input type="hidden" name="server_index" value="{{$si}}">
             <input type="hidden" name="db_index" value="{{$di}}">
             <input type="password" name="new_password" placeholder="New password" required>
             <button type="submit">Update</button>
+          </form>
+          <form method="POST" action="/generate-password" style="display:inline;">
+            <input type="hidden" name="server_index" value="{{$si}}">
+            <input type="hidden" name="db_index" value="{{$di}}">
+            <button type="submit">Generate</button>
           </form>
         </td>
       </tr>
@@ -90,6 +98,7 @@ func newAdminHandler(configPath string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex(configPath))
 	mux.HandleFunc("/update-password", handleUpdatePassword(configPath))
+	mux.HandleFunc("/generate-password", handleGeneratePassword(configPath))
 	mux.HandleFunc("/add-database", handleAddDatabase(configPath))
 	return basicAuth(mux)
 }
@@ -209,6 +218,85 @@ func handleUpdatePassword(configPath string) http.HandlerFunc {
 			return
 		}
 		http.Redirect(w, r, "/?msg="+url.QueryEscape("Password updated"), http.StatusSeeOther)
+	}
+}
+
+func generatePassword() (string, error) {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
+	b := make([]byte, 20)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = charset[n.Int64()]
+	}
+	return string(b), nil
+}
+
+func handleGeneratePassword(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		si, err := strconv.Atoi(r.FormValue("server_index"))
+		if err != nil {
+			http.Error(w, "Invalid server_index", http.StatusBadRequest)
+			return
+		}
+		di, err := strconv.Atoi(r.FormValue("db_index"))
+		if err != nil {
+			http.Error(w, "Invalid db_index", http.StatusBadRequest)
+			return
+		}
+
+		newPassword, err := generatePassword()
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to generate password"), http.StatusSeeOther)
+			return
+		}
+
+		configMu.Lock()
+		defer configMu.Unlock()
+
+		fileData, err := os.ReadFile(configPath)
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to read config"), http.StatusSeeOther)
+			return
+		}
+		var cfg Config
+		if err := json.Unmarshal(fileData, &cfg); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to parse config"), http.StatusSeeOther)
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			http.Error(w, "server_index out of range", http.StatusBadRequest)
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			http.Error(w, "db_index out of range", http.StatusBadRequest)
+			return
+		}
+
+		dbName := cfg.Servers[si].Databases[di].Database
+		cfg.Servers[si].Databases[di].Password = newPassword
+
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
+			return
+		}
+		if err := os.WriteFile(configPath, out, 0600); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to write config"), http.StatusSeeOther)
+			return
+		}
+		msg := fmt.Sprintf("Generated password for %s: %s", dbName, newPassword)
+		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 	}
 }
 
