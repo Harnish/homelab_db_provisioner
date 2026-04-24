@@ -17,11 +17,19 @@ import (
 
 var configMu sync.RWMutex
 
+type BackupConfig struct {
+	Enabled         bool   `json:"enabled"`
+	Schedule        string `json:"schedule"`          // "daily" or "weekly"
+	KeepCount       int    `json:"keep_count"`
+	RestoreOnCreate bool   `json:"restore_on_create"` // restore newest backup when db is newly created
+}
+
 type DatabaseConfig struct {
-	Database    string   `json:"database"`
-	User        string   `json:"user"`
-	Password    string   `json:"password"`
-	Permissions []string `json:"permissions"`
+	Database    string        `json:"database"`
+	User        string        `json:"user"`
+	Password    string        `json:"password"`
+	Permissions []string      `json:"permissions"`
+	Backup      *BackupConfig `json:"backup,omitempty"`
 }
 
 type DatabaseServer struct {
@@ -60,6 +68,8 @@ func main() {
 		}
 		go startAdminServer(getConfigPath())
 	}
+
+	go startBackupScheduler(getConfigPath())
 
 	watchMode := os.Getenv("WATCH_MODE")
 	if watchMode == "true" {
@@ -232,16 +242,20 @@ func processConfig(config *Config) error {
 		for i, dbConfig := range server.Databases {
 			log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
 
+			var created bool
+			var provErr error
 			if dbType == MariaDB {
-				if err := provisionMariaDB(db, dbConfig, server.DryRun); err != nil {
-					log.Printf("Failed to provision database %s on %s: %v", dbConfig.Database, serverName, err)
-					continue
-				}
+				created, provErr = provisionMariaDB(db, dbConfig, server.DryRun)
 			} else {
-				if err := provisionPostgreSQL(db, dbConfig, server.DryRun); err != nil {
-					log.Printf("Failed to provision database %s on %s: %v", dbConfig.Database, serverName, err)
-					continue
-				}
+				created, provErr = provisionPostgreSQL(db, dbConfig, server.DryRun)
+			}
+			if provErr != nil {
+				log.Printf("Failed to provision database %s on %s: %v", dbConfig.Database, serverName, provErr)
+				continue
+			}
+
+			if created && !server.DryRun && dbConfig.Backup != nil && dbConfig.Backup.RestoreOnCreate {
+				restoreDatabase(server, dbConfig, getConfigPath())
 			}
 
 			log.Printf("Successfully provisioned database: %s with user: %s on %s", dbConfig.Database, dbConfig.User, serverName)
@@ -287,13 +301,13 @@ func connectWithRetry(driverName, connStr string, maxRetries int, delay time.Dur
 	return nil, fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, err)
 }
 
-func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) error {
+func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, error) {
 	ctx := context.Background()
 
 	// Check if user exists
 	userExists, err := checkPostgreSQLUserExists(ctx, db, config.User)
 	if err != nil {
-		return fmt.Errorf("failed to check user existence: %w", err)
+		return false, fmt.Errorf("failed to check user existence: %w", err)
 	}
 
 	// Create user if it doesn't exist
@@ -307,7 +321,7 @@ func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 			log.Printf("[DRY RUN] Would execute: %s", createUserSQL)
 		} else {
 			if _, err := db.ExecContext(ctx, createUserSQL); err != nil {
-				return fmt.Errorf("failed to create user: %w", err)
+				return false, fmt.Errorf("failed to create user: %w", err)
 			}
 			log.Printf("User %s created successfully", config.User)
 		}
@@ -322,7 +336,7 @@ func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 			log.Printf("[DRY RUN] Would execute: %s", updatePasswordSQL)
 		} else {
 			if _, err := db.ExecContext(ctx, updatePasswordSQL); err != nil {
-				return fmt.Errorf("failed to update user password: %w", err)
+				return false, fmt.Errorf("failed to update user password: %w", err)
 			}
 			log.Printf("Password updated for user %s", config.User)
 		}
@@ -331,7 +345,7 @@ func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 	// Check if database exists
 	dbExists, err := checkPostgreSQLDatabaseExists(ctx, db, config.Database)
 	if err != nil {
-		return fmt.Errorf("failed to check database existence: %w", err)
+		return false, fmt.Errorf("failed to check database existence: %w", err)
 	}
 
 	// Create database if it doesn't exist
@@ -345,7 +359,7 @@ func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 			log.Printf("[DRY RUN] Would execute: %s", createDbSQL)
 		} else {
 			if _, err := db.ExecContext(ctx, createDbSQL); err != nil {
-				return fmt.Errorf("failed to create database: %w", err)
+				return false, fmt.Errorf("failed to create database: %w", err)
 			}
 			log.Printf("Database %s created successfully", config.Database)
 		}
@@ -360,7 +374,7 @@ func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 			log.Printf("[DRY RUN] Would execute: %s", alterOwnerSQL)
 		} else {
 			if _, err := db.ExecContext(ctx, alterOwnerSQL); err != nil {
-				return fmt.Errorf("failed to alter database owner: %w", err)
+				return false, fmt.Errorf("failed to alter database owner: %w", err)
 			}
 			log.Printf("Owner of database %s set to %s", config.Database, config.User)
 		}
@@ -386,15 +400,21 @@ func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 		log.Printf("[DRY RUN] Would execute: %s", grantSQL)
 	} else {
 		if _, err := db.ExecContext(ctx, grantSQL); err != nil {
-			return fmt.Errorf("failed to grant privileges: %w", err)
+			return false, fmt.Errorf("failed to grant privileges: %w", err)
 		}
 	}
 
-	return nil
+	return !dbExists, nil
 }
 
-func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) error {
+func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, error) {
 	ctx := context.Background()
+
+	// Check if database exists before creating
+	dbExists, err := checkMariaDBDatabaseExists(ctx, db, config.Database)
+	if err != nil {
+		return false, fmt.Errorf("failed to check database existence: %w", err)
+	}
 
 	// Create database if it doesn't exist
 	log.Printf("Creating database if not exists: %s", config.Database)
@@ -405,14 +425,14 @@ func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 		log.Printf("[DRY RUN] Would execute: %s", createDbSQL)
 	} else {
 		if _, err := db.ExecContext(ctx, createDbSQL); err != nil {
-			return fmt.Errorf("failed to create database: %w", err)
+			return false, fmt.Errorf("failed to create database: %w", err)
 		}
 	}
 
 	// Check if user exists
 	userExists, err := checkMariaDBUserExists(ctx, db, config.User)
 	if err != nil {
-		return fmt.Errorf("failed to check user existence: %w", err)
+		return false, fmt.Errorf("failed to check user existence: %w", err)
 	}
 
 	if !userExists {
@@ -426,7 +446,7 @@ func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 			log.Printf("[DRY RUN] Would execute: %s", createUserSQL)
 		} else {
 			if _, err := db.ExecContext(ctx, createUserSQL); err != nil {
-				return fmt.Errorf("failed to create user: %w", err)
+				return false, fmt.Errorf("failed to create user: %w", err)
 			}
 			log.Printf("User %s created successfully", config.User)
 		}
@@ -441,7 +461,7 @@ func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 			log.Printf("[DRY RUN] Would execute: %s", updatePasswordSQL)
 		} else {
 			if _, err := db.ExecContext(ctx, updatePasswordSQL); err != nil {
-				return fmt.Errorf("failed to update user password: %w", err)
+				return false, fmt.Errorf("failed to update user password: %w", err)
 			}
 			log.Printf("Password updated for user %s", config.User)
 		}
@@ -467,7 +487,7 @@ func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 		log.Printf("[DRY RUN] Would execute: %s", grantSQL)
 	} else {
 		if _, err := db.ExecContext(ctx, grantSQL); err != nil {
-			return fmt.Errorf("failed to grant privileges: %w", err)
+			return false, fmt.Errorf("failed to grant privileges: %w", err)
 		}
 	}
 
@@ -476,13 +496,13 @@ func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) error {
 		log.Printf("[DRY RUN] Would execute: FLUSH PRIVILEGES")
 	} else {
 		if _, err := db.ExecContext(ctx, "FLUSH PRIVILEGES"); err != nil {
-			return fmt.Errorf("failed to flush privileges: %w", err)
+			return false, fmt.Errorf("failed to flush privileges: %w", err)
 		}
 	}
 
 	log.Printf("Granted privileges on database %s to user %s", config.Database, config.User)
 
-	return nil
+	return !dbExists, nil
 }
 
 func checkPostgreSQLUserExists(ctx context.Context, db *sql.DB, username string) (bool, error) {
@@ -503,6 +523,13 @@ func checkMariaDBUserExists(ctx context.Context, db *sql.DB, username string) (b
 	var count int
 	query := "SELECT COUNT(*) FROM mysql.user WHERE user = ? AND host = '%'"
 	err := db.QueryRowContext(ctx, query, username).Scan(&count)
+	return count > 0, err
+}
+
+func checkMariaDBDatabaseExists(ctx context.Context, db *sql.DB, database string) (bool, error) {
+	var count int
+	query := "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?"
+	err := db.QueryRowContext(ctx, query, database).Scan(&count)
 	return count > 0, err
 }
 
