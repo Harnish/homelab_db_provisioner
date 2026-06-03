@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 WORKDIR /app
 
 # Install build dependencies
@@ -17,9 +17,9 @@ COPY *.go ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a -ldflags '-extldflags "-static"' -o provisioner .
 
 # Final stage - alpine provides pg_dump and mysqldump for backups
-FROM alpine:3.19
+FROM alpine:3.21
 
-RUN apk add --no-cache postgresql16-client mariadb-client ca-certificates tzdata && \
+RUN apk add --no-cache postgresql18-client mariadb-client ca-certificates tzdata && \
     addgroup -S nonroot && adduser -S -G nonroot nonroot
 
 WORKDIR /app
