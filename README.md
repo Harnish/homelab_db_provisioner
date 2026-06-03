@@ -15,6 +15,7 @@ A Go-based application that automates PostgreSQL and MariaDB/MySQL database and 
 - **Automated backups**: Scheduled daily or weekly `pg_dump`/`mysqldump` backups with configurable retention
 - **Auto-restore**: Optionally restores from the newest backup when a database is first created
 - **Kubernetes native**: Works seamlessly with ConfigMaps
+- **PostgreSQL extensions**: Automatically installs specified extensions into each database
 - **Idempotent**: Safe to run multiple times
 - **Multi-database support**: Works with both PostgreSQL and MariaDB/MySQL
 
@@ -100,6 +101,7 @@ Create a `config.json` file with your database server configurations. You can ma
     - `database`: Name of the database to create
     - `user`: Username to create/manage
     - `password`: Password for the user
+    - `extensions`: Optional list of PostgreSQL extensions to install in the database (e.g. `["uuid-ossp", "pgcrypto"]`). Each extension is created with `CREATE EXTENSION IF NOT EXISTS`. Not supported for MariaDB.
     - `backup`: Optional backup configuration (see [Backups](#backups))
       - `enabled`: `true` to enable scheduled backups
       - `schedule`: `"daily"` or `"weekly"` (weekly runs on Sundays at midnight)
@@ -107,6 +109,21 @@ Create a `config.json` file with your database server configurations. You can ma
       - `restore_on_create`: `true` to restore from the newest backup when the database is first created
 
 **Note**: The application automatically detects the database type for each server based on the connection string prefix.
+
+### PostgreSQL Extensions
+
+Add an `extensions` array to any PostgreSQL database entry to have those extensions installed automatically:
+
+```json
+{
+  "database": "app_db",
+  "user": "app_user",
+  "password": "securepassword123",
+  "extensions": ["uuid-ossp", "pgcrypto", "pg_trgm"]
+}
+```
+
+Each extension is installed with `CREATE EXTENSION IF NOT EXISTS`, so it is safe to run repeatedly. Extensions are installed by the root/superuser connection and are available to the database user immediately after provisioning. This field is PostgreSQL-only and is ignored for MariaDB servers.
 
 ## Usage
 
