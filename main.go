@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ type DatabaseConfig struct {
 	User        string        `json:"user"`
 	Password    string        `json:"password"`
 	Permissions []string      `json:"permissions"`
+	Extensions  []string      `json:"extensions,omitempty"`
 	Backup      *BackupConfig `json:"backup,omitempty"`
 }
 
@@ -247,7 +249,7 @@ func processConfig(config *Config) error {
 			if dbType == MariaDB {
 				created, provErr = provisionMariaDB(db, dbConfig, server.DryRun)
 			} else {
-				created, provErr = provisionPostgreSQL(db, dbConfig, server.DryRun)
+				created, provErr = provisionPostgreSQL(db, connStr, dbConfig, server.DryRun)
 			}
 			if provErr != nil {
 				log.Printf("Failed to provision database %s on %s: %v", dbConfig.Database, serverName, provErr)
@@ -301,7 +303,7 @@ func connectWithRetry(driverName, connStr string, maxRetries int, delay time.Dur
 	return nil, fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, err)
 }
 
-func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, error) {
+func provisionPostgreSQL(db *sql.DB, rootConnStr string, config DatabaseConfig, dryRun bool) (bool, error) {
 	ctx := context.Background()
 
 	// Check if user exists
@@ -404,7 +406,42 @@ func provisionPostgreSQL(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, 
 		}
 	}
 
+	if len(config.Extensions) > 0 {
+		if err := provisionPostgreSQLExtensions(ctx, rootConnStr, config.Database, config.Extensions, dryRun); err != nil {
+			return false, err
+		}
+	}
+
 	return !dbExists, nil
+}
+
+func provisionPostgreSQLExtensions(ctx context.Context, rootConnStr, dbName string, extensions []string, dryRun bool) error {
+	if dryRun {
+		for _, ext := range extensions {
+			log.Printf("[DRY RUN] Would execute on %s: CREATE EXTENSION IF NOT EXISTS %s", dbName, quoteIdentifier(ext))
+		}
+		return nil
+	}
+
+	u, err := url.Parse(rootConnStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse connection string for extensions: %w", err)
+	}
+	u.Path = "/" + dbName
+	dbConn, err := sql.Open("postgres", u.String())
+	if err != nil {
+		return fmt.Errorf("failed to open connection to %s for extensions: %w", dbName, err)
+	}
+	defer dbConn.Close()
+
+	for _, ext := range extensions {
+		createExtSQL := fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %s", quoteIdentifier(ext))
+		if _, err := dbConn.ExecContext(ctx, createExtSQL); err != nil {
+			return fmt.Errorf("failed to create extension %s on %s: %w", ext, dbName, err)
+		}
+		log.Printf("Extension %s created/verified on database %s", ext, dbName)
+	}
+	return nil
 }
 
 func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, error) {
