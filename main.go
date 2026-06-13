@@ -50,9 +50,13 @@ type DBType int
 const (
 	PostgreSQL DBType = iota
 	MariaDB
+	MongoDB
 )
 
 func detectDBType(connStr string) DBType {
+	if strings.HasPrefix(connStr, "mongodb://") || strings.HasPrefix(connStr, "mongodb+srv://") {
+		return MongoDB
+	}
 	if strings.HasPrefix(connStr, "mariadb://") || strings.HasPrefix(connStr, "mysql://") {
 		return MariaDB
 	}
@@ -60,7 +64,7 @@ func detectDBType(connStr string) DBType {
 }
 
 func main() {
-	log.Println("PostgreSQL Database Provisioner starting...")
+	log.Println("Database Provisioner starting (PostgreSQL, MariaDB, MongoDB)...")
 
 	if os.Getenv("ADMIN_SITE") == "true" {
 		adminUser := os.Getenv("ADMIN_USER")
@@ -247,12 +251,38 @@ func processConfig(config *Config) error {
 			}
 
 			log.Printf("Detected MariaDB/MySQL connection for %s", serverName)
+		} else if dbType == MongoDB {
+			connStr = server.RootConnectionString
+			log.Printf("Detected MongoDB connection for %s", serverName)
 		} else {
 			connStr = server.RootConnectionString
 			log.Printf("Detected PostgreSQL connection for %s", serverName)
 		}
 
-		// Connect to database as root
+		// MongoDB doesn't use database/sql, handle separately
+		if dbType == MongoDB {
+			// Process each database configuration for this server
+			for i, dbConfig := range server.Databases {
+				log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
+
+				created, provErr := provisionMongoDB(server.RootConnectionString, dbConfig, server.DryRun)
+				if provErr != nil {
+					log.Printf("Failed to provision MongoDB database %s on %s: %v", dbConfig.Database, serverName, provErr)
+					continue
+				}
+
+				if created && !server.DryRun && dbConfig.Backup != nil && dbConfig.Backup.RestoreOnCreate {
+					restoreDatabase(server, dbConfig, getConfigPath())
+				}
+
+				log.Printf("Successfully provisioned MongoDB database: %s with user: %s on %s", dbConfig.Database, dbConfig.User, serverName)
+			}
+
+			log.Printf("Completed processing server: %s", serverName)
+			continue
+		}
+
+		// Connect to SQL database as root
 		var db *sql.DB
 		var err error
 

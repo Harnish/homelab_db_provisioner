@@ -1,9 +1,12 @@
-# PostgreSQL Database Provisioner
+# Database Provisioner
 
-A Go-based application that automates PostgreSQL and MariaDB/MySQL database and user provisioning. It runs in a Docker container and creates databases with dedicated users based on a configuration file.  Making it super easy for homelab users to setup the databases.  
+A Go-based application that automates PostgreSQL and MariaDB/MySQL database and user provisioning. It runs in a Docker container or as a systemd service, creating databases with dedicated users based on a configuration file. Ideal for homelab users who want to easily setup the databases.  
 
 ## Features
 
+- **Multi-database support**: Works with PostgreSQL, MariaDB, MongoDB and MySQL
+- **Multi-platform packages**: Pre-built `.deb` and `.rpm` packages for x86_64 and ARM64
+- **Deployment flexibility**: Docker, Kubernetes ConfigMaps, or systemd services
 - Creates PostgreSQL users with specified passwords
 - Creates databases with specified owners
 - Sets proper ownership and privileges
@@ -12,12 +15,12 @@ A Go-based application that automates PostgreSQL and MariaDB/MySQL database and 
 - Configurable via JSON
 - **Watch mode**: Continuously monitors config file for changes
 - **Admin web UI**: Optional browser-based interface to add databases and change passwords
-- **Automated backups**: Scheduled daily or weekly `pg_dump`/`mysqldump` backups with configurable retention
+- **Automated backups**: Scheduled daily or weekly backups with configurable retention (PostgreSQL: `pg_dump`, MariaDB: `mysqldump`)
 - **Auto-restore**: Optionally restores from the newest backup when a database is first created
 - **Kubernetes native**: Works seamlessly with ConfigMaps
 - **PostgreSQL extensions**: Automatically installs specified extensions into each database
 - **Idempotent**: Safe to run multiple times
-- **Multi-database support**: Works with both PostgreSQL and MariaDB/MySQL
+- **Full backup feature parity**: Both PostgreSQL and MariaDB support all backup features identically
 
 ## Configuration
 
@@ -338,7 +341,14 @@ Then open `http://localhost:8080` in your browser. You will be prompted for the 
 
 ## Backups
 
-The provisioner can automatically back up databases using `pg_dump` (PostgreSQL) or `mysqldump` (MariaDB/MySQL). Backups are compressed with gzip and stored next to the config file.
+The provisioner can automatically back up databases using `pg_dump` (PostgreSQL) or `mysqldump` (MariaDB/MySQL). Both database systems support:
+- **Scheduled backups**: Daily or weekly automation
+- **Compression**: All backups are gzip-compressed  
+- **Retention management**: Automatic pruning of old backups
+- **Auto-restore**: Restoring newest backup when a database is first created
+- **Incremental updates**: Backups run seamlessly without blocking provisioning
+
+Backups are compressed with gzip and stored next to the config file.
 
 ### Directory Structure
 
@@ -435,6 +445,48 @@ Add a PersistentVolumeClaim and mount it at the same path as the config director
 4. **Limit network access**: Don't expose PostgreSQL directly to the internet
 5. **Use secrets management**: Consider using Docker secrets or environment variables for sensitive data
 
+## Building Packages
+
+GitHub Actions automatically builds packages for both x86_64 and arm64 architectures when you push a tag (e.g., `v1.0.0`):
+
+### Automated Package Builds
+
+Push a semantic version tag to trigger the workflow:
+
+```bash
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+The `.github/workflows/packages.yml` workflow will:
+1. Build Go binaries for `amd64` and `arm64`
+2. Generate Debian packages (`.deb`) using nfpm
+3. Generate RPM packages (`.rpm`) using nfpm
+4. Create a GitHub Release with all four artifacts attached
+
+### Artifacts
+
+After a tagged release, you'll have:
+- `homelab-db-provisioner_0.3.0_amd64.deb`
+- `homelab-db-provisioner_0.3.0_arm64.deb`
+- `homelab-db-provisioner_0.3.0_x86_64.rpm`
+- `homelab-db-provisioner_0.3.0_aarch64.rpm`
+
+### Installation from Package
+
+```bash
+# Debian/Ubuntu
+sudo dpkg -i homelab-db-provisioner_0.3.0_amd64.deb
+
+# RHEL/CentOS/Fedora
+sudo rpm -i homelab-db-provisioner_0.3.0_x86_64.rpm
+```
+
+The package installs:
+- Binary to `/usr/local/bin/homelab-db-provisioner`
+- Systemd service files (oneshot and continuous)
+- Example environment config to `/etc/homelab-db-provisioner/env.example`
+
 ## Error Handling
 
 The application includes comprehensive error handling:
@@ -446,11 +498,27 @@ The application includes comprehensive error handling:
 ## Logs
 
 The application provides detailed logging:
-- Connection status
-- User creation/update
-- Database creation/update
-- Ownership and privilege changes
-- Error messages with context
+- **Backup Summary**: At the beginning of each run, displays a table of all configured backups with server, database, and frequency
+- **Connection status**: When connecting to each server
+- **User creation/update**: When users are created or passwords updated
+- **Database creation/update**: When databases are created or owners changed
+- **Backup operations**: When backups are created or pruned
+- **Restore operations**: When databases are restored from backups
+- **Error messages**: With detailed context
+
+### Example Output
+
+```
+========================================
+Backup configuration summary:
+| server | database | frequency |
+|---|---|---|
+| Production PostgreSQL | app_db | daily |
+| Production PostgreSQL | analytics_db | weekly |
+| Production MariaDB | wordpress_db | daily |
+No backups configured
+========================================
+```
 
 ## License
 

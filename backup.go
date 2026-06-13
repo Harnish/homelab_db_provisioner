@@ -37,6 +37,14 @@ func runBackups(config *Config, configPath string, t time.Time) {
 	backupBase := filepath.Join(filepath.Dir(configPath), "backups")
 
 	for _, server := range config.Servers {
+		dbType := detectDBType(server.RootConnectionString)
+
+		// Handle MongoDB separately
+		if dbType == MongoDB {
+			mongoDBBackupSchedule(config, configPath, t)
+			continue
+		}
+
 		for _, db := range server.Databases {
 			if db.Backup == nil || !db.Backup.Enabled {
 				continue
@@ -54,7 +62,7 @@ func runBackups(config *Config, configPath string, t time.Time) {
 			filename := filepath.Join(dir, fmt.Sprintf("%s_%s.sql.gz", db.Database, t.Format("2006-01-02")))
 
 			var err error
-			if detectDBType(server.RootConnectionString) == PostgreSQL {
+			if dbType == PostgreSQL {
 				err = backupPostgreSQL(server.RootConnectionString, db.Database, filename)
 			} else {
 				err = backupMariaDB(server.RootConnectionString, db.Database, filename)
@@ -178,7 +186,8 @@ func pruneBackups(dir, database string, keepCount int) {
 }
 
 func restoreDatabase(server DatabaseServer, db DatabaseConfig, configPath string) {
-	backupFile := findNewestBackup(configPath, server.Name, db.Database)
+	dbType := detectDBType(server.RootConnectionString)
+	backupFile := findNewestBackup(configPath, server.Name, db.Database, dbType)
 	if backupFile == "" {
 		log.Printf("restore: no backup found for %s/%s, skipping", server.Name, db.Database)
 		return
@@ -187,8 +196,10 @@ func restoreDatabase(server DatabaseServer, db DatabaseConfig, configPath string
 	log.Printf("restore: restoring %s/%s from %s", server.Name, db.Database, backupFile)
 
 	var err error
-	if detectDBType(server.RootConnectionString) == PostgreSQL {
+	if dbType == PostgreSQL {
 		err = restorePostgreSQL(server.RootConnectionString, db.Database, backupFile)
+	} else if dbType == MongoDB {
+		err = restoreMongoDB(server.RootConnectionString, db.Database, backupFile)
 	} else {
 		err = restoreMariaDB(server.RootConnectionString, db.Database, backupFile)
 	}
@@ -200,9 +211,16 @@ func restoreDatabase(server DatabaseServer, db DatabaseConfig, configPath string
 	}
 }
 
-func findNewestBackup(configPath, serverName, database string) string {
+func findNewestBackup(configPath, serverName, database string, dbType DBType) string {
 	dir := filepath.Join(filepath.Dir(configPath), "backups", slugify(serverName), database)
-	pattern := filepath.Join(dir, database+"_*.sql.gz")
+
+	var pattern string
+	if dbType == MongoDB {
+		pattern = filepath.Join(dir, database+"_*.archive.gz")
+	} else {
+		pattern = filepath.Join(dir, database+"_*.sql.gz")
+	}
+
 	files, err := filepath.Glob(pattern)
 	if err != nil || len(files) == 0 {
 		return ""

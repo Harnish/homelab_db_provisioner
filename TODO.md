@@ -1,4 +1,4 @@
-- [ ] **Mongo Support** - support for creating a collection, setting user that owns it, setting the password and backing it up
-- [ ] **Show Backup Schedule** - after a reconfigure report the current backup schedule
+- [x] **Mongo Support** - support for creating a collection, setting user that owns it, setting the password and backing it up
+- [X] **Show Backup Schedule** - after a reconfigure report the current backup schedule
 - [x] **Systemd files** - create a systemd file for this to run on a server if not in k8s
-- [ ] **Github action to build packages** - rpm and debs for arm and amd64
+- [X] **Github action to build packages** - rpm and debs for arm and amd64
