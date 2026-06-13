@@ -46,10 +46,9 @@ jobs:
 
       - name: Install nfpm
         run: |
-          curl -sSfL \
-            https://github.com/goreleaser/nfpm/releases/download/v2.41.4/nfpm_2.41.4_Linux_x86_64.tar.gz \
-            | tar -xz nfpm
-          sudo mv nfpm /usr/local/bin/nfpm
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.4
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          nfpm --version
 
       - name: Build DEB
         env:
