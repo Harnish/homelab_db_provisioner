@@ -10,7 +10,7 @@ homepage: https://github.com/Harnish/homelab_db_provisioner
 license: MIT
 
 contents:
-  - src: ./dist/homelab-db-provisioner_${GOARCH}
+  - src: ./dist/homelab-db-provisioner
     dst: /usr/local/bin/homelab-db-provisioner
     file_info:
       mode: 0755

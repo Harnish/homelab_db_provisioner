@@ -42,7 +42,7 @@ jobs:
           mkdir -p dist
           go build -a \
             -ldflags="-s -w -X main.version=${VERSION}" \
-            -o "dist/homelab-db-provisioner_${GOARCH}" .
+            -o dist/homelab-db-provisioner .
 
       - name: Install nfpm
         run: |
