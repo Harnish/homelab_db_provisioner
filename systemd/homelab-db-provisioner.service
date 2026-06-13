@@ -1,0 +1,26 @@
+[Unit]
+Description=Homelab DB Provisioner (watch mode)
+Documentation=https://github.com/Harnish/homelab_db_provisioner
+After=network.target
+
+[Service]
+Type=simple
+User=db-provisioner
+Group=db-provisioner
+EnvironmentFile=/etc/homelab-db-provisioner/env
+ExecStart=/usr/local/bin/homelab-db-provisioner
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=homelab-db-provisioner
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/homelab-db-provisioner /var/lib/homelab-db-provisioner
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
