@@ -20,7 +20,7 @@ var configMu sync.RWMutex
 
 type BackupConfig struct {
 	Enabled         bool   `json:"enabled"`
-	Schedule        string `json:"schedule"`          // "daily" or "weekly"
+	Schedule        string `json:"schedule"` // "daily" or "weekly"
 	KeepCount       int    `json:"keep_count"`
 	RestoreOnCreate bool   `json:"restore_on_create"` // restore newest backup when db is newly created
 }
@@ -176,6 +176,36 @@ func loadConfig() (*Config, error) {
 }
 
 func processConfig(config *Config) error {
+	log.Println("========================================")
+	log.Println("Backup configuration summary:")
+	log.Println("| server | database | frequency |")
+	log.Println("|---|---|---|")
+	backupFound := false
+	for serverIdx, server := range config.Servers {
+		serverName := server.Name
+		if serverName == "" {
+			serverName = fmt.Sprintf("Server %d", serverIdx+1)
+		}
+		for _, db := range server.Databases {
+			if db.Backup == nil {
+				continue
+			}
+			frequency := "disabled"
+			if db.Backup.Enabled {
+				frequency = db.Backup.Schedule
+				if frequency == "" {
+					frequency = "daily"
+				}
+			}
+			backupFound = true
+			log.Printf("| %s | %s | %s |", serverName, db.Database, frequency)
+		}
+	}
+	if !backupFound {
+		log.Println("No backups configured")
+	}
+	log.Println("========================================")
+
 	// Process each server
 	for serverIdx, server := range config.Servers {
 		serverName := server.Name
