@@ -1,0 +1,36 @@
+name: homelab-db-provisioner
+arch: "${GOARCH}"
+platform: linux
+version: "${VERSION}"
+maintainer: Joseph Harnish <josephharnish@gmail.com>
+description: |
+  Provisions and manages PostgreSQL and MariaDB databases from a JSON config.
+  Supports watch mode, scheduled backups, and an optional admin HTTP UI.
+homepage: https://github.com/Harnish/homelab_db_provisioner
+license: MIT
+
+contents:
+  - src: ./dist/homelab-db-provisioner_${GOARCH}
+    dst: /usr/local/bin/homelab-db-provisioner
+    file_info:
+      mode: 0755
+
+  - src: ./systemd/homelab-db-provisioner.service
+    dst: /lib/systemd/system/homelab-db-provisioner.service
+    file_info:
+      mode: 0644
+
+  - src: ./systemd/homelab-db-provisioner-oneshot.service
+    dst: /lib/systemd/system/homelab-db-provisioner-oneshot.service
+    file_info:
+      mode: 0644
+
+  - src: ./systemd/env.example
+    dst: /etc/homelab-db-provisioner/env.example
+    type: config|noreplace
+    file_info:
+      mode: 0640
+
+scripts:
+  postinstall: ./packaging/postinstall.sh
+  preremove: ./packaging/preremove.sh
