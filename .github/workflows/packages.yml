@@ -55,12 +55,14 @@ jobs:
         env:
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.ver.outputs.version }}
+          ARCH: ${{ matrix.goarch }}
         run: nfpm package --packager deb --target dist/
 
       - name: Build RPM
         env:
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.ver.outputs.version }}
+          ARCH: ${{ matrix.goarch == 'amd64' && 'x86_64' || 'aarch64' }}
         run: nfpm package --packager rpm --target dist/
 
       - name: Upload packages

@@ -1,5 +1,5 @@
 name: homelab-db-provisioner
-arch: "${GOARCH}"
+arch: "${ARCH}"
 platform: linux
 version: "${VERSION}"
 maintainer: Joseph Harnish <josephharnish@gmail.com>
