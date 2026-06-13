@@ -46,7 +46,7 @@ jobs:
 
       - name: Install nfpm
         run: |
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.4
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
           export PATH="$(go env GOPATH)/bin:$PATH"
           nfpm --version
 
