@@ -46,7 +46,7 @@ Create a `config.json` file with your database server configurations. You can ma
 }
 ```
 
-### Multi-Server Configuration (PostgreSQL + MariaDB)
+### Multi-Server Configuration (PostgreSQL + MariaDB + MongoDB)
 
 ```json
 {
@@ -79,13 +79,18 @@ Create a `config.json` file with your database server configurations. You can ma
       ]
     },
     {
-      "name": "Development PostgreSQL",
-      "root_connection_string": "postgres://postgres:devpassword@postgres-dev:5432/postgres?sslmode=disable",
+      "name": "Production MongoDB",
+      "root_connection_string": "mongodb://admin:rootpassword@mongo-prod:27017/admin",
       "databases": [
         {
-          "database": "test_db",
-          "user": "test_user",
-          "password": "testpass123"
+          "database": "app_db",
+          "user": "app_user",
+          "password": "securepassword123",
+          "backup": {
+            "enabled": true,
+            "schedule": "daily",
+            "keep_count": 7
+          }
         }
       ]
     }
@@ -100,6 +105,7 @@ Create a `config.json` file with your database server configurations. You can ma
   - `root_connection_string`: Database connection string with superuser credentials
     - PostgreSQL: `postgres://user:pass@host:port/database?sslmode=disable`
     - MariaDB: `mariadb://user:pass@host:port/` or `mysql://user:pass@host:port/`
+    - MongoDB: `mongodb://user:pass@host:port/admin` or `mongodb+srv://user:pass@host/admin`
   - `databases`: Array of database configurations for this server
     - `database`: Name of the database to create
     - `user`: Username to create/manage
@@ -111,7 +117,7 @@ Create a `config.json` file with your database server configurations. You can ma
       - `keep_count`: Number of backup files to retain (0 = keep all)
       - `restore_on_create`: `true` to restore from the newest backup when the database is first created
 
-**Note**: The application automatically detects the database type for each server based on the connection string prefix.
+**Note**: The application automatically detects the database type for each server based on the connection string prefix. The `extensions` and `permissions` fields are PostgreSQL-only and are ignored for MariaDB and MongoDB servers.
 
 ### PostgreSQL Extensions
 
@@ -282,6 +288,22 @@ mariadb://root:mypassword@localhost:3306/
 
 **Note**: For MariaDB, you can use either `mariadb://` or `mysql://` as the protocol - both work the same way.
 
+### MongoDB
+```
+mongodb://username:password@host:port/admin
+```
+or for Atlas / SRV records:
+```
+mongodb+srv://username:password@cluster.example.com/admin
+```
+
+Example:
+```
+mongodb://admin:mypassword@localhost:27017/admin
+```
+
+The root connection string must point to the `admin` database so the provisioner can create users and list databases. Standard MongoDB URI options (e.g. `?authSource=admin&tls=true`) are passed through unchanged.
+
 ## Behavior
 
 - **Idempotent**: Safe to run multiple times
@@ -294,6 +316,11 @@ mariadb://root:mypassword@localhost:3306/
   - If a user exists: Updates the password
   - Grants all privileges on the database to the user unless specified
   - Automatically flushes privileges after changes
+- **MongoDB**:
+  - Connects to the `admin` database using the root connection string
+  - Drops and recreates the user on each run to apply any password change (idempotent)
+  - Grants the `readWrite` role on the target database
+  - Creates a `{database}_data` collection on first run to materialize the database (MongoDB databases are created implicitly when data is first written)
 - Includes connection retry logic (5 attempts with 5-second delays)
 - Automatically detects database type from connection string
 
@@ -341,14 +368,16 @@ Then open `http://localhost:8080` in your browser. You will be prompted for the 
 
 ## Backups
 
-The provisioner can automatically back up databases using `pg_dump` (PostgreSQL) or `mysqldump` (MariaDB/MySQL). Both database systems support:
+The provisioner can automatically back up databases using `pg_dump` (PostgreSQL), `mysqldump` (MariaDB/MySQL), or `mongodump` (MongoDB). All three support:
 - **Scheduled backups**: Daily or weekly automation
-- **Compression**: All backups are gzip-compressed  
+- **Compression**: All backups are gzip-compressed
 - **Retention management**: Automatic pruning of old backups
 - **Auto-restore**: Restoring newest backup when a database is first created
 - **Incremental updates**: Backups run seamlessly without blocking provisioning
 
 Backups are compressed with gzip and stored next to the config file.
+
+> **MongoDB tools**: `mongodump` and `mongorestore` must be installed separately. They are not bundled in the Docker image. Install the [MongoDB Database Tools](https://www.mongodb.com/try/download/database-tools) package on the host or add it to a custom image layer.
 
 ### Directory Structure
 
@@ -365,7 +394,13 @@ backups/
   production-mariadb/
     wordpress_db/
       wordpress_db_2024-01-15.sql.gz
+  production-mongodb/
+    app_db/
+      app_db_2024-01-15.archive.gz
+      app_db_2024-01-16.archive.gz
 ```
+
+MongoDB backups use the `.archive.gz` extension (mongodump archive format) rather than `.sql.gz`.
 
 ### Scheduling
 
