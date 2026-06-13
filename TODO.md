@@ -2,3 +2,4 @@
 - [X] **Show Backup Schedule** - after a reconfigure report the current backup schedule
 - [x] **Systemd files** - create a systemd file for this to run on a server if not in k8s
 - [X] **Github action to build packages** - rpm and debs for arm and amd64
+- [ ] **Package Dependencies** - this needs the appropriate backup tools like pgdump to work, need to set the dependencies for the rpm/deb packages.
