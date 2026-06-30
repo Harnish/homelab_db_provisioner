@@ -4,7 +4,7 @@ go 1.21.0
 
 require (
 	github.com/go-sql-driver/mysql v1.9.3
-	github.com/lib/pq v1.10.9
+	github.com/lib/pq v1.12.3
 	go.mongodb.org/mongo-driver v1.14.0
 )
 
