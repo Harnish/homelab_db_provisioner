@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -13,7 +14,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 var configMu sync.RWMutex
@@ -421,7 +422,16 @@ func provisionPostgreSQL(db *sql.DB, rootConnStr string, config DatabaseConfig, 
 			log.Printf("[DRY RUN] Would execute: %s", createDbSQL)
 		} else {
 			if _, err := db.ExecContext(ctx, createDbSQL); err != nil {
-				return false, fmt.Errorf("failed to create database: %w", err)
+				if !isCollationVersionMismatch(err) {
+					return false, fmt.Errorf("failed to create database: %w", err)
+				}
+				log.Printf("Collation version mismatch on template1, refreshing collation version and retrying")
+				if _, err := db.ExecContext(ctx, "ALTER DATABASE template1 REFRESH COLLATION VERSION"); err != nil {
+					return false, fmt.Errorf("failed to refresh template1 collation version: %w", err)
+				}
+				if _, err := db.ExecContext(ctx, createDbSQL); err != nil {
+					return false, fmt.Errorf("failed to create database after collation refresh: %w", err)
+				}
 			}
 			log.Printf("Database %s created successfully", config.Database)
 		}
@@ -614,6 +624,18 @@ func checkPostgreSQLDatabaseExists(ctx context.Context, db *sql.DB, database str
 	query := "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)"
 	err := db.QueryRowContext(ctx, query, database).Scan(&exists)
 	return exists, err
+}
+
+// isCollationVersionMismatch reports whether err is Postgres error XX000
+// with a "collation version mismatch" message, raised against template1
+// after the host's glibc/ICU collation library is upgraded out from under
+// an existing cluster.
+func isCollationVersionMismatch(err error) bool {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return false
+	}
+	return pqErr.Code == "XX000" && strings.Contains(pqErr.Message, "collation version mismatch")
 }
 
 func checkMariaDBUserExists(ctx context.Context, db *sql.DB, username string) (bool, error) {
