@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 func secretNameFor(serverName, database string) string {
@@ -114,4 +117,38 @@ func (m *k8sSecretsManager) rotateSecret(ctx context.Context, serverName, databa
 	}
 	log.Printf("k8s-secrets: rotated secret %s", name)
 	return password, nil
+}
+
+const serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+func readNamespaceFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read namespace file %s: %w", path, err)
+	}
+	ns := strings.TrimSpace(string(data))
+	if ns == "" {
+		return "", fmt.Errorf("namespace file %s is empty", path)
+	}
+	return ns, nil
+}
+
+// initK8sSecretsManager builds a k8sSecretsManager from in-cluster config.
+// USE_KUBERNETES_SECRETS only works inside a Kubernetes pod: it fails fast
+// (log.Fatal) rather than let the provisioner run with unmanaged passwords.
+func initK8sSecretsManager() *k8sSecretsManager {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("USE_KUBERNETES_SECRETS=true requires running inside a Kubernetes pod: %v", err)
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("failed to create Kubernetes client: %v", err)
+	}
+	namespace, err := readNamespaceFile(serviceAccountNamespaceFile)
+	if err != nil {
+		log.Fatalf("failed to determine Kubernetes namespace: %v", err)
+	}
+	log.Printf("k8s-secrets: enabled, namespace=%s", namespace)
+	return &k8sSecretsManager{client: clientset, namespace: namespace}
 }

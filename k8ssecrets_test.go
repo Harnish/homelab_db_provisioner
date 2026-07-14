@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -159,5 +161,35 @@ func TestRotateSecret_CreatesWhenMissing(t *testing.T) {
 	}
 	if string(secret.Data["password"]) != password {
 		t.Errorf("secret password = %q, want %q", secret.Data["password"], password)
+	}
+}
+
+func TestReadNamespaceFile_Success(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "namespace")
+	if err := os.WriteFile(path, []byte("my-namespace\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := readNamespaceFile(path)
+	if err != nil {
+		t.Fatalf("readNamespaceFile() error = %v", err)
+	}
+	if ns != "my-namespace" {
+		t.Errorf("namespace = %q, want %q", ns, "my-namespace")
+	}
+}
+
+func TestReadNamespaceFile_MissingFile(t *testing.T) {
+	if _, err := readNamespaceFile(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestReadNamespaceFile_EmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "namespace")
+	if err := os.WriteFile(path, []byte("   \n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readNamespaceFile(path); err == nil {
+		t.Fatal("expected error for empty/whitespace-only namespace file")
 	}
 }

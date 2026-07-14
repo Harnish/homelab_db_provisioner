@@ -76,6 +76,10 @@ func main() {
 		go startAdminServer(getConfigPath())
 	}
 
+	if os.Getenv("USE_KUBERNETES_SECRETS") == "true" {
+		secretsManager = initK8sSecretsManager()
+	}
+
 	go startBackupScheduler(getConfigPath())
 
 	watchMode := os.Getenv("WATCH_MODE")
