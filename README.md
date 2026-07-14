@@ -366,6 +366,106 @@ Then open `http://localhost:8080` in your browser. You will be prompted for the 
 
 > **Note:** The admin UI is most useful with `WATCH_MODE=true`. In one-shot mode the process exits after the first run and the UI has no time to apply changes.
 
+## Kubernetes Secrets Mode
+
+When `USE_KUBERNETES_SECRETS=true`, the provisioner ignores the `password`
+field in `config.json` for every database entry. Instead, for each database
+it gets-or-creates a Kubernetes `Secret` containing a randomly generated
+password, and uses that password to create/update the database user. The
+`password` field in `config.json` is never read or overwritten in this mode
+— leave it blank or filled with a placeholder, it's ignored either way.
+
+**This mode only works when the provisioner is running inside a Kubernetes
+pod.** It uses in-cluster configuration (the pod's ServiceAccount token and
+CA certificate) to talk to the Kubernetes API — there is no support for
+running this mode via systemd or plain Docker outside a cluster.
+
+### Secret naming
+
+One Secret is created per database entry, named:
+
+```
+<slugified-server-name>-<slugified-database-name>-credentials
+```
+
+For example, a server named `"Main PostgreSQL"` with a database `"app_db"`
+gets a Secret named `main-postgresql-app-db-credentials`. Each Secret has a
+single key: `password`.
+
+### Required RBAC
+
+The pod's ServiceAccount needs permission to read and write Secrets in its
+namespace:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: homelab-db-provisioner-secrets
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: homelab-db-provisioner-secrets
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: homelab-db-provisioner
+  namespace: default
+roleRef:
+  kind: Role
+  name: homelab-db-provisioner-secrets
+  apiGroup: rbac.authorization.k8s.io
+```
+
+`kubernetes-deployment.yaml`, `kubernetes-job.yaml`, and
+`kubernetes-with-secrets.yaml` already include this Role/RoleBinding and a
+`serviceAccountName` — just uncomment the `USE_KUBERNETES_SECRETS` env var
+in whichever manifest you use.
+
+**Security note:** RBAC can't restrict access by Secret name pattern, so
+this grants the provisioner read/write access to *all* Secrets in its
+namespace — the same trust level it already has via its root database
+connection-string Secret. Run it in a dedicated namespace if you want
+tighter isolation.
+
+### Using the generated secret in your own app
+
+Reference the generated Secret from your application's Deployment the same
+way you'd reference any Kubernetes Secret:
+
+```yaml
+env:
+- name: DB_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: main-postgresql-app-db-credentials
+      key: password
+```
+
+Or inspect it directly:
+
+```bash
+kubectl get secret main-postgresql-app-db-credentials -n default \
+  -o jsonpath='{.data.password}' | base64 -d
+```
+
+The admin UI (see [Admin Web UI](#admin-web-ui)) shows the exact secret name
+for each database when this mode is enabled.
+
+### Rotating a password
+
+With the admin UI enabled, each database row shows its Secret name and a
+**Rotate** button. Clicking it generates a new password and updates the
+Secret in place — the provisioner picks up the new password on its next
+reconcile pass (immediately in watch mode). There is no automatic rotation
+schedule; rotation is manual.
+
 ## Backups
 
 The provisioner can automatically back up databases using `pg_dump` (PostgreSQL), `mysqldump` (MariaDB/MySQL), or `mongodump` (MongoDB). All three support:
@@ -471,6 +571,7 @@ Add a PersistentVolumeClaim and mount it at the same path as the config director
 | `ADMIN_USER` | — | Basic Auth username for admin UI (required when `ADMIN_SITE=true`) |
 | `ADMIN_PASSWORD` | — | Basic Auth password for admin UI (required when `ADMIN_SITE=true`) |
 | `ADMIN_PORT` | `8080` | Port for the admin web UI |
+| `USE_KUBERNETES_SECRETS` | `false` | `true` to generate per-database passwords into Kubernetes Secrets instead of using `config.json` passwords. Requires running inside a Kubernetes pod. See [Kubernetes Secrets Mode](#kubernetes-secrets-mode). |
 
 ## Security Considerations
 
