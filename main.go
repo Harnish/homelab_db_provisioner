@@ -270,6 +270,13 @@ func processConfig(config *Config) error {
 			for i, dbConfig := range server.Databases {
 				log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
 
+				var k8sErr error
+				dbConfig, k8sErr = applyK8sPassword(context.Background(), serverName, dbConfig)
+				if k8sErr != nil {
+					log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
+					continue
+				}
+
 				created, provErr := provisionMongoDB(server.RootConnectionString, dbConfig, server.DryRun)
 				if provErr != nil {
 					log.Printf("Failed to provision MongoDB database %s on %s: %v", dbConfig.Database, serverName, provErr)
@@ -308,6 +315,13 @@ func processConfig(config *Config) error {
 		// Process each database configuration for this server
 		for i, dbConfig := range server.Databases {
 			log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
+
+			var k8sErr error
+			dbConfig, k8sErr = applyK8sPassword(context.Background(), serverName, dbConfig)
+			if k8sErr != nil {
+				log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
+				continue
+			}
 
 			var created bool
 			var provErr error
