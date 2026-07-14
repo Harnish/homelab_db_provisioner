@@ -271,7 +271,9 @@ func processConfig(config *Config) error {
 				log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
 
 				var k8sErr error
-				dbConfig, k8sErr = applyK8sPassword(context.Background(), serverName, dbConfig)
+				k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, dbConfig)
+				k8sCancel()
 				if k8sErr != nil {
 					log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
 					continue
@@ -317,7 +319,9 @@ func processConfig(config *Config) error {
 			log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
 
 			var k8sErr error
-			dbConfig, k8sErr = applyK8sPassword(context.Background(), serverName, dbConfig)
+			k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, dbConfig)
+			k8sCancel()
 			if k8sErr != nil {
 				log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
 				continue
