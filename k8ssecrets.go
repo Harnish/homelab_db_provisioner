@@ -62,3 +62,56 @@ func (m *k8sSecretsManager) reconcilePassword(ctx context.Context, serverName st
 	log.Printf("k8s-secrets: created secret %s", name)
 	return password, nil
 }
+
+func applyK8sPassword(ctx context.Context, serverName string, db DatabaseConfig) (DatabaseConfig, error) {
+	if secretsManager == nil {
+		return db, nil
+	}
+	password, err := secretsManager.reconcilePassword(ctx, serverName, db)
+	if err != nil {
+		return db, err
+	}
+	db.Password = password
+	return db, nil
+}
+
+func (m *k8sSecretsManager) rotateSecret(ctx context.Context, serverName, database string) (string, error) {
+	name := secretNameFor(serverName, database)
+	password, err := generatePassword()
+	if err != nil {
+		return "", fmt.Errorf("generate password: %w", err)
+	}
+
+	secret, err := m.client.CoreV1().Secrets(m.namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return "", fmt.Errorf("get secret %s: %w", name, err)
+		}
+		newSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: m.namespace,
+				Labels:    map[string]string{k8sManagedByLabel: "homelab-db-provisioner"},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{"password": []byte(password)},
+		}
+		if _, err := m.client.CoreV1().Secrets(m.namespace).Create(ctx, newSecret, metav1.CreateOptions{}); err != nil {
+			return "", fmt.Errorf("create secret %s: %w", name, err)
+		}
+		log.Printf("k8s-secrets: created secret %s during rotate", name)
+		return password, nil
+	}
+
+	secret = secret.DeepCopy()
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+	secret.Data["password"] = []byte(password)
+	delete(secret.StringData, "password")
+	if _, err := m.client.CoreV1().Secrets(m.namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		return "", fmt.Errorf("update secret %s: %w", name, err)
+	}
+	log.Printf("k8s-secrets: rotated secret %s", name)
+	return password, nil
+}

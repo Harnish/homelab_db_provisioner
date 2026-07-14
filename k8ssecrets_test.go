@@ -77,3 +77,87 @@ func TestReconcilePassword_SecretMissingPasswordKey(t *testing.T) {
 		t.Fatal("expected error when secret has no password key")
 	}
 }
+
+func TestApplyK8sPassword_NoManagerReturnsUnchanged(t *testing.T) {
+	secretsManager = nil
+	db := DatabaseConfig{Database: "app_db", Password: "from-config"}
+	got, err := applyK8sPassword(context.Background(), "Main PostgreSQL", db)
+	if err != nil {
+		t.Fatalf("applyK8sPassword() error = %v", err)
+	}
+	if got.Password != "from-config" {
+		t.Errorf("password = %q, want unchanged %q", got.Password, "from-config")
+	}
+}
+
+func TestApplyK8sPassword_OverridesFromSecret(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	db := DatabaseConfig{Database: "app_db", Password: "from-config"}
+	got, err := applyK8sPassword(context.Background(), "Main PostgreSQL", db)
+	if err != nil {
+		t.Fatalf("applyK8sPassword() error = %v", err)
+	}
+	if got.Password == "from-config" || got.Password == "" {
+		t.Errorf("expected password overridden with generated secret value, got %q", got.Password)
+	}
+}
+
+func TestApplyK8sPassword_PropagatesError(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "main-postgresql-app-db-credentials", Namespace: "default"},
+		Data:       map[string][]byte{"other-key": []byte("x")},
+	})
+	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	db := DatabaseConfig{Database: "app_db", Password: "from-config"}
+	_, err := applyK8sPassword(context.Background(), "Main PostgreSQL", db)
+	if err == nil {
+		t.Fatal("expected error to propagate from reconcilePassword")
+	}
+}
+
+func TestRotateSecret_UpdatesExisting(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "main-postgresql-app-db-credentials", Namespace: "default"},
+		Data:       map[string][]byte{"password": []byte("old-password")},
+	})
+	m := &k8sSecretsManager{client: client, namespace: "default"}
+
+	newPassword, err := m.rotateSecret(context.Background(), "Main PostgreSQL", "app_db")
+	if err != nil {
+		t.Fatalf("rotateSecret() error = %v", err)
+	}
+	if newPassword == "old-password" || newPassword == "" {
+		t.Fatalf("expected a new non-empty password, got %q", newPassword)
+	}
+
+	secret, err := client.CoreV1().Secrets("default").Get(context.Background(), "main-postgresql-app-db-credentials", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	if string(secret.Data["password"]) != newPassword {
+		t.Errorf("secret password = %q, want %q", secret.Data["password"], newPassword)
+	}
+}
+
+func TestRotateSecret_CreatesWhenMissing(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	m := &k8sSecretsManager{client: client, namespace: "default"}
+
+	password, err := m.rotateSecret(context.Background(), "Main PostgreSQL", "app_db")
+	if err != nil {
+		t.Fatalf("rotateSecret() error = %v", err)
+	}
+
+	secret, err := client.CoreV1().Secrets("default").Get(context.Background(), "main-postgresql-app-db-credentials", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected secret to be created: %v", err)
+	}
+	if string(secret.Data["password"]) != password {
+		t.Errorf("secret password = %q, want %q", secret.Data["password"], password)
+	}
+}
