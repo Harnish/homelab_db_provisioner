@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 const testConfigJSON = `{
@@ -299,6 +303,131 @@ func TestAddDatabase_InvalidServerIndex(t *testing.T) {
 		"permissions":  {""},
 	}
 	req := httptest.NewRequest("POST", "/add-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestIndex_ShowsK8sSecretColumnWhenEnabled(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	secretsManager = &k8sSecretsManager{client: fake.NewSimpleClientset(), namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	wantName := secretNameFor("Test Server", "mydb")
+	for _, want := range []string{wantName, "Rotate", "Kubernetes Secret"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in body", want)
+		}
+	}
+	if strings.Contains(body, `action="/update-password"`) {
+		t.Error("did not expect manual password form when k8s secrets enabled")
+	}
+}
+
+func TestIndex_HidesK8sSecretColumnWhenDisabled(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+	secretsManager = nil
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if strings.Contains(body, "Kubernetes Secret") {
+		t.Error("did not expect Kubernetes Secret column when disabled")
+	}
+	if !strings.Contains(body, `action="/update-password"`) {
+		t.Error("expected manual password form when k8s secrets disabled")
+	}
+}
+
+func TestRotateSecret_Success(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	client := fake.NewSimpleClientset()
+	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	form := url.Values{"server_index": {"0"}, "db_index": {"0"}}
+	req := httptest.NewRequest("POST", "/rotate-secret", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	secret, err := client.CoreV1().Secrets("default").Get(context.Background(), secretNameFor("Test Server", "mydb"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected secret to exist: %v", err)
+	}
+	if len(secret.Data["password"]) == 0 {
+		t.Error("expected password to be set on the secret")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Servers[0].Databases[0].Password != "mypass" {
+		t.Errorf("expected config.json password untouched, got %q", cfg.Servers[0].Databases[0].Password)
+	}
+}
+
+func TestRotateSecret_DisabledWhenManagerNil(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+	secretsManager = nil
+
+	form := url.Values{"server_index": {"0"}, "db_index": {"0"}}
+	req := httptest.NewRequest("POST", "/rotate-secret", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestRotateSecret_InvalidDBIndex(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	secretsManager = &k8sSecretsManager{client: fake.NewSimpleClientset(), namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	form := url.Values{"server_index": {"0"}, "db_index": {"99"}}
+	req := httptest.NewRequest("POST", "/rotate-secret", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth("admin", "secret")
 	w := httptest.NewRecorder()

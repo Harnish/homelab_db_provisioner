@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
@@ -13,10 +14,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
-	"join": strings.Join,
+	"join":       strings.Join,
+	"secretName": secretNameFor,
 }).Parse(`<!DOCTYPE html>
 <html>
 <head>
@@ -43,28 +46,49 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
   {{range $si, $server := .Servers}}
     <h3>{{$server.Name}}</h3>
     <table>
-      <tr><th>Database</th><th>User</th><th>Permissions</th><th>Change Password</th></tr>
+      <tr><th>Database</th><th>User</th><th>Permissions</th><th>{{if $.K8sEnabled}}Kubernetes Secret{{else}}Change Password{{end}}</th></tr>
       {{range $di, $db := $server.Databases}}
       <tr>
         <td>{{$db.Database}}</td>
         <td>{{$db.User}}</td>
         <td>{{if $db.Permissions}}{{join $db.Permissions ", "}}{{else}}ALL{{end}}</td>
         <td>
-          <form method="POST" action="/update-password" style="display:inline-flex;gap:0.25rem;align-items:center;">
-            <input type="hidden" name="server_index" value="{{$si}}">
-            <input type="hidden" name="db_index" value="{{$di}}">
-            <input type="password" name="new_password" placeholder="New password" required>
-            <button type="submit">Update</button>
-          </form>
-          <form method="POST" action="/generate-password" style="display:inline;">
-            <input type="hidden" name="server_index" value="{{$si}}">
-            <input type="hidden" name="db_index" value="{{$di}}">
-            <button type="submit">Generate</button>
-          </form>
+          {{if $.K8sEnabled}}
+            <code>{{secretName $server.Name $db.Database}}</code>
+            <form method="POST" action="/rotate-secret" style="display:inline;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <button type="submit">Rotate</button>
+            </form>
+          {{else}}
+            <form method="POST" action="/update-password" style="display:inline-flex;gap:0.25rem;align-items:center;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <input type="password" name="new_password" placeholder="New password" required>
+              <button type="submit">Update</button>
+            </form>
+            <form method="POST" action="/generate-password" style="display:inline;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <button type="submit">Generate</button>
+            </form>
+          {{end}}
         </td>
       </tr>
       {{end}}
     </table>
+  {{end}}
+
+  {{if .K8sEnabled}}
+  <h2>Kubernetes Secrets Mode</h2>
+  <p>Passwords above are generated and stored in per-database Secrets in namespace <code>{{.Namespace}}</code>. Reference one from your own Deployment:</p>
+  <pre>kubectl get secret &lt;secret-name&gt; -n {{.Namespace}} -o jsonpath='{.data.password}' | base64 -d</pre>
+  <pre>env:
+- name: DB_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: &lt;secret-name&gt;
+      key: password</pre>
   {{end}}
 
   <h2>Add Database</h2>
@@ -92,6 +116,8 @@ type adminTemplateData struct {
 	Servers    []DatabaseServer
 	Flash      string
 	FlashError bool
+	K8sEnabled bool
+	Namespace  string
 }
 
 func newAdminHandler(configPath string) http.Handler {
@@ -99,6 +125,7 @@ func newAdminHandler(configPath string) http.Handler {
 	mux.HandleFunc("/", handleIndex(configPath))
 	mux.HandleFunc("/update-password", handleUpdatePassword(configPath))
 	mux.HandleFunc("/generate-password", handleGeneratePassword(configPath))
+	mux.HandleFunc("/rotate-secret", handleRotateSecret(configPath))
 	mux.HandleFunc("/add-database", handleAddDatabase(configPath))
 	return basicAuth(mux)
 }
@@ -149,11 +176,16 @@ func handleIndex(configPath string) http.HandlerFunc {
 			return
 		}
 		msg := r.URL.Query().Get("msg")
-		if err := adminTemplate.Execute(w, adminTemplateData{
+		tmplData := adminTemplateData{
 			Servers:    cfg.Servers,
 			Flash:      msg,
 			FlashError: strings.HasPrefix(msg, "Error:"),
-		}); err != nil {
+			K8sEnabled: secretsManager != nil,
+		}
+		if secretsManager != nil {
+			tmplData.Namespace = secretsManager.namespace
+		}
+		if err := adminTemplate.Execute(w, tmplData); err != nil {
 			log.Printf("template execute error: %v", err)
 		}
 	}
@@ -296,6 +328,67 @@ func handleGeneratePassword(configPath string) http.HandlerFunc {
 			return
 		}
 		msg := fmt.Sprintf("Generated password for %s: %s", dbName, newPassword)
+		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+	}
+}
+
+func handleRotateSecret(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if secretsManager == nil {
+			http.Error(w, "Kubernetes secrets mode is not enabled", http.StatusBadRequest)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		si, err := strconv.Atoi(r.FormValue("server_index"))
+		if err != nil {
+			http.Error(w, "Invalid server_index", http.StatusBadRequest)
+			return
+		}
+		di, err := strconv.Atoi(r.FormValue("db_index"))
+		if err != nil {
+			http.Error(w, "Invalid db_index", http.StatusBadRequest)
+			return
+		}
+
+		configMu.RLock()
+		fileData, err := os.ReadFile(configPath)
+		configMu.RUnlock()
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to read config"), http.StatusSeeOther)
+			return
+		}
+		var cfg Config
+		if err := json.Unmarshal(fileData, &cfg); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to parse config"), http.StatusSeeOther)
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			http.Error(w, "server_index out of range", http.StatusBadRequest)
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			http.Error(w, "db_index out of range", http.StatusBadRequest)
+			return
+		}
+
+		serverName := cfg.Servers[si].Name
+		dbName := cfg.Servers[si].Databases[di].Database
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		if _, err := secretsManager.rotateSecret(ctx, serverName, dbName); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to rotate secret: "+err.Error()), http.StatusSeeOther)
+			return
+		}
+
+		msg := fmt.Sprintf("Rotated Kubernetes secret %s", secretNameFor(serverName, dbName))
 		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 	}
 }
