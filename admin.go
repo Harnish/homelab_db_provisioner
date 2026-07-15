@@ -114,6 +114,17 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
       key: password</pre>
   {{end}}
 
+  <h2>Add Server</h2>
+  <form method="POST" action="/add-server">
+    <fieldset>
+      <legend>New Server Entry</legend>
+      <label>Name: <input type="text" name="name" required></label>
+      <label>Root connection string: <input type="text" name="root_connection_string" placeholder="postgres://user:pass@host:5432/postgres" required></label>
+      <label><input type="checkbox" name="dry_run"> Dry run</label>
+      <button type="submit">Add Server</button>
+    </fieldset>
+  </form>
+
   <h2>Add Database</h2>
   <form method="POST" action="/add-database">
     <fieldset>

@@ -981,3 +981,27 @@ func TestAddDatabase_WithoutBackupConfigStaysNil(t *testing.T) {
 		t.Errorf("expected Backup to stay nil when no backup fields are submitted, got %+v", added.Backup)
 	}
 }
+
+func TestIndex_ShowsAddServerForm(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	for _, want := range []string{
+		`action="/add-server"`,
+		`name="name"`,
+		`name="root_connection_string"`,
+		`name="dry_run"`,
+		"Add Server",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in body", want)
+		}
+	}
+}
