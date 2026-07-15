@@ -240,3 +240,226 @@ func handleAPIDeleteServer(configPath string) http.HandlerFunc {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
+
+func handleAPIListDatabases(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		si, err := strconv.Atoi(r.PathValue("si"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid server index")
+			return
+		}
+		configMu.RLock()
+		cfg, err := loadConfigFile(configPath)
+		configMu.RUnlock()
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to read config: "+err.Error())
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			writeJSONError(w, http.StatusNotFound, "server not found")
+			return
+		}
+		dbs := make([]databaseResponse, len(cfg.Servers[si].Databases))
+		for di, d := range cfg.Servers[si].Databases {
+			dbs[di] = toDatabaseResponse(di, d)
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"databases": dbs})
+	}
+}
+
+func handleAPIGetDatabase(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		si, err := strconv.Atoi(r.PathValue("si"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid server index")
+			return
+		}
+		di, err := strconv.Atoi(r.PathValue("di"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid database index")
+			return
+		}
+		configMu.RLock()
+		cfg, err := loadConfigFile(configPath)
+		configMu.RUnlock()
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to read config: "+err.Error())
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			writeJSONError(w, http.StatusNotFound, "server not found")
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			writeJSONError(w, http.StatusNotFound, "database not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, toDatabaseResponse(di, cfg.Servers[si].Databases[di]))
+	}
+}
+
+type createDatabaseRequest struct {
+	Database    string        `json:"database"`
+	User        string        `json:"user"`
+	Password    string        `json:"password"`
+	Permissions []string      `json:"permissions"`
+	Extensions  []string      `json:"extensions"`
+	Backup      *BackupConfig `json:"backup"`
+}
+
+func handleAPICreateDatabase(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		si, err := strconv.Atoi(r.PathValue("si"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid server index")
+			return
+		}
+		var req createDatabaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		if req.Database == "" || req.User == "" || req.Password == "" {
+			writeJSONError(w, http.StatusBadRequest, "database, user, and password are required")
+			return
+		}
+
+		configMu.Lock()
+		defer configMu.Unlock()
+
+		cfg, err := loadConfigFile(configPath)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to read config: "+err.Error())
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			writeJSONError(w, http.StatusNotFound, "server not found")
+			return
+		}
+
+		newDB := DatabaseConfig{
+			Database:    req.Database,
+			User:        req.User,
+			Password:    req.Password,
+			Permissions: req.Permissions,
+			Extensions:  req.Extensions,
+			Backup:      req.Backup,
+		}
+		cfg.Servers[si].Databases = append(cfg.Servers[si].Databases, newDB)
+		di := len(cfg.Servers[si].Databases) - 1
+
+		if err := saveConfigFile(configPath, cfg); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to write config: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, toDatabaseResponse(di, newDB))
+	}
+}
+
+type updateDatabaseRequest struct {
+	User        *string       `json:"user"`
+	Password    *string       `json:"password"`
+	Permissions *[]string     `json:"permissions"`
+	Extensions  *[]string     `json:"extensions"`
+	Backup      *BackupConfig `json:"backup"`
+}
+
+func handleAPIUpdateDatabase(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		si, err := strconv.Atoi(r.PathValue("si"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid server index")
+			return
+		}
+		di, err := strconv.Atoi(r.PathValue("di"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid database index")
+			return
+		}
+		var req updateDatabaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+
+		configMu.Lock()
+		defer configMu.Unlock()
+
+		cfg, err := loadConfigFile(configPath)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to read config: "+err.Error())
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			writeJSONError(w, http.StatusNotFound, "server not found")
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			writeJSONError(w, http.StatusNotFound, "database not found")
+			return
+		}
+
+		db := &cfg.Servers[si].Databases[di]
+		if req.User != nil {
+			db.User = *req.User
+		}
+		if req.Password != nil {
+			db.Password = *req.Password
+		}
+		if req.Permissions != nil {
+			db.Permissions = *req.Permissions
+		}
+		if req.Extensions != nil {
+			db.Extensions = *req.Extensions
+		}
+		if req.Backup != nil {
+			db.Backup = req.Backup
+		}
+
+		if err := saveConfigFile(configPath, cfg); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to write config: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, toDatabaseResponse(di, *db))
+	}
+}
+
+func handleAPIDeleteDatabase(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		si, err := strconv.Atoi(r.PathValue("si"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid server index")
+			return
+		}
+		di, err := strconv.Atoi(r.PathValue("di"))
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid database index")
+			return
+		}
+
+		configMu.Lock()
+		defer configMu.Unlock()
+
+		cfg, err := loadConfigFile(configPath)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to read config: "+err.Error())
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			writeJSONError(w, http.StatusNotFound, "server not found")
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			writeJSONError(w, http.StatusNotFound, "database not found")
+			return
+		}
+		dbs := cfg.Servers[si].Databases
+		cfg.Servers[si].Databases = append(dbs[:di], dbs[di+1:]...)
+
+		if err := saveConfigFile(configPath, cfg); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to write config: "+err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}

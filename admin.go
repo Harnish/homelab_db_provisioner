@@ -177,6 +177,11 @@ func newAdminHandler(configPath string) http.Handler {
 	mux.HandleFunc("POST /api/servers", handleAPICreateServer(configPath))
 	mux.HandleFunc("PATCH /api/servers/{si}", handleAPIUpdateServer(configPath))
 	mux.HandleFunc("DELETE /api/servers/{si}", handleAPIDeleteServer(configPath))
+	mux.HandleFunc("GET /api/servers/{si}/databases", handleAPIListDatabases(configPath))
+	mux.HandleFunc("GET /api/servers/{si}/databases/{di}", handleAPIGetDatabase(configPath))
+	mux.HandleFunc("POST /api/servers/{si}/databases", handleAPICreateDatabase(configPath))
+	mux.HandleFunc("PATCH /api/servers/{si}/databases/{di}", handleAPIUpdateDatabase(configPath))
+	mux.HandleFunc("DELETE /api/servers/{si}/databases/{di}", handleAPIDeleteDatabase(configPath))
 	return basicAuth(mux)
 }
 
