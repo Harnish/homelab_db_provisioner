@@ -126,6 +126,7 @@ func newAdminHandler(configPath string) http.Handler {
 	mux.HandleFunc("/update-password", handleUpdatePassword(configPath))
 	mux.HandleFunc("/generate-password", handleGeneratePassword(configPath))
 	mux.HandleFunc("/rotate-secret", handleRotateSecret(configPath))
+	mux.HandleFunc("/update-backup", handleUpdateBackup(configPath))
 	mux.HandleFunc("/add-database", handleAddDatabase(configPath))
 	return basicAuth(mux)
 }
@@ -329,6 +330,84 @@ func handleGeneratePassword(configPath string) http.HandlerFunc {
 		}
 		msg := fmt.Sprintf("Generated password for %s: %s", dbName, newPassword)
 		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+	}
+}
+
+func parseBackupFields(r *http.Request) BackupConfig {
+	schedule := r.FormValue("backup_schedule")
+	if schedule == "" {
+		schedule = "daily"
+	}
+	keepCount := 0
+	if s := strings.TrimSpace(r.FormValue("backup_keep_count")); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			keepCount = n
+		}
+	}
+	return BackupConfig{
+		Enabled:         r.FormValue("backup_enabled") == "on",
+		Schedule:        schedule,
+		KeepCount:       keepCount,
+		RestoreOnCreate: r.FormValue("backup_restore_on_create") == "on",
+	}
+}
+
+func handleUpdateBackup(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		si, err := strconv.Atoi(r.FormValue("server_index"))
+		if err != nil {
+			http.Error(w, "Invalid server_index", http.StatusBadRequest)
+			return
+		}
+		di, err := strconv.Atoi(r.FormValue("db_index"))
+		if err != nil {
+			http.Error(w, "Invalid db_index", http.StatusBadRequest)
+			return
+		}
+
+		backup := parseBackupFields(r)
+
+		configMu.Lock()
+		defer configMu.Unlock()
+
+		fileData, err := os.ReadFile(configPath)
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to read config"), http.StatusSeeOther)
+			return
+		}
+		var cfg Config
+		if err := json.Unmarshal(fileData, &cfg); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to parse config"), http.StatusSeeOther)
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			http.Error(w, "server_index out of range", http.StatusBadRequest)
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			http.Error(w, "db_index out of range", http.StatusBadRequest)
+			return
+		}
+		cfg.Servers[si].Databases[di].Backup = &backup
+
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
+			return
+		}
+		if err := os.WriteFile(configPath, out, 0600); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to write config"), http.StatusSeeOther)
+			return
+		}
+		http.Redirect(w, r, "/?msg="+url.QueryEscape("Backup settings updated"), http.StatusSeeOther)
 	}
 }
 

@@ -27,6 +27,28 @@ const testConfigJSON = `{
   ]
 }`
 
+const testConfigWithBackupJSON = `{
+  "servers": [
+    {
+      "name": "Test Server",
+      "root_connection_string": "postgres://root:pass@localhost/postgres",
+      "databases": [
+        {
+          "database": "mydb",
+          "user": "myuser",
+          "password": "mypass",
+          "backup": {
+            "enabled": true,
+            "schedule": "daily",
+            "keep_count": 7,
+            "restore_on_create": false
+          }
+        }
+      ]
+    }
+  ]
+}`
+
 func makeTestConfig(t *testing.T, content string) string {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "config*.json")
@@ -475,6 +497,194 @@ func TestRotateSecret_InvalidDBIndex(t *testing.T) {
 
 	form := url.Values{"server_index": {"0"}, "db_index": {"99"}}
 	req := httptest.NewRequest("POST", "/rotate-secret", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUpdateBackup_EnablesOnPreviouslyNilBackup(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index":             {"0"},
+		"db_index":                 {"0"},
+		"backup_enabled":           {"on"},
+		"backup_schedule":          {"weekly"},
+		"backup_keep_count":        {"5"},
+		"backup_restore_on_create": {"on"},
+	}
+	req := httptest.NewRequest("POST", "/update-backup", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	backup := cfg.Servers[0].Databases[0].Backup
+	if backup == nil {
+		t.Fatal("expected Backup to be non-nil after update")
+	}
+	if !backup.Enabled || backup.Schedule != "weekly" || backup.KeepCount != 5 || !backup.RestoreOnCreate {
+		t.Errorf("unexpected backup config: %+v", backup)
+	}
+}
+
+func TestUpdateBackup_DisableKeepsConfigNonNil(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigWithBackupJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index":      {"0"},
+		"db_index":          {"0"},
+		"backup_schedule":   {"daily"},
+		"backup_keep_count": {"7"},
+	}
+	req := httptest.NewRequest("POST", "/update-backup", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	backup := cfg.Servers[0].Databases[0].Backup
+	if backup == nil {
+		t.Fatal("expected Backup to stay non-nil (config block present, just disabled)")
+	}
+	if backup.Enabled {
+		t.Error("expected Enabled to be false since backup_enabled was omitted from the form")
+	}
+	if backup.KeepCount != 7 {
+		t.Errorf("expected KeepCount 7, got %d", backup.KeepCount)
+	}
+}
+
+func TestUpdateBackup_ChangeSchedule(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigWithBackupJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index":      {"0"},
+		"db_index":          {"0"},
+		"backup_enabled":    {"on"},
+		"backup_schedule":   {"weekly"},
+		"backup_keep_count": {"7"},
+	}
+	req := httptest.NewRequest("POST", "/update-backup", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Servers[0].Databases[0].Backup.Schedule != "weekly" {
+		t.Errorf("expected schedule weekly, got %q", cfg.Servers[0].Databases[0].Backup.Schedule)
+	}
+}
+
+func TestUpdateBackup_KeepCountDefaultsToZeroOnBadInput(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index":      {"0"},
+		"db_index":          {"0"},
+		"backup_enabled":    {"on"},
+		"backup_keep_count": {"not-a-number"},
+	}
+	req := httptest.NewRequest("POST", "/update-backup", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Servers[0].Databases[0].Backup.KeepCount != 0 {
+		t.Errorf("expected KeepCount to default to 0, got %d", cfg.Servers[0].Databases[0].Backup.KeepCount)
+	}
+}
+
+func TestUpdateBackup_InvalidServerIndex(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	form := url.Values{"server_index": {"99"}, "db_index": {"0"}}
+	req := httptest.NewRequest("POST", "/update-backup", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUpdateBackup_InvalidDBIndex(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	form := url.Values{"server_index": {"0"}, "db_index": {"99"}}
+	req := httptest.NewRequest("POST", "/update-backup", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth("admin", "secret")
 	w := httptest.NewRecorder()
