@@ -388,6 +388,27 @@ func handleRotateSecret(configPath string) http.HandlerFunc {
 			return
 		}
 
+		// Reprovision just this one database in the background so the new
+		// password actually gets applied to the DB user. This is dispatched
+		// as a goroutine (rather than run synchronously) because
+		// connectWithRetry can take up to ~50s worst case against an
+		// unreachable host, and the HTTP handler should redirect immediately.
+		singleServerConfig := &Config{
+			Servers: []DatabaseServer{
+				{
+					Name:                 cfg.Servers[si].Name,
+					RootConnectionString: cfg.Servers[si].RootConnectionString,
+					DryRun:               cfg.Servers[si].DryRun,
+					Databases:            []DatabaseConfig{cfg.Servers[si].Databases[di]},
+				},
+			},
+		}
+		go func() {
+			if err := processConfig(singleServerConfig); err != nil {
+				log.Printf("k8s-secrets: reprovision after rotate for %s/%s failed: %v", serverName, dbName, err)
+			}
+		}()
+
 		msg := fmt.Sprintf("Rotated Kubernetes secret %s", secretNameFor(serverName, dbName))
 		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 	}

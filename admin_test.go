@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -397,6 +398,52 @@ func TestRotateSecret_Success(t *testing.T) {
 	}
 	if cfg.Servers[0].Databases[0].Password != "mypass" {
 		t.Errorf("expected config.json password untouched, got %q", cfg.Servers[0].Databases[0].Password)
+	}
+}
+
+// TestRotateSecret_ReturnsQuicklyEvenWithUnreachableServer verifies that
+// handleRotateSecret's HTTP response does not block on reprovisioning the
+// database after rotating the Secret. processConfig is dispatched in a
+// background goroutine specifically because connectWithRetry can take up
+// to ~50s worst case against an unreachable host; the handler must
+// redirect immediately regardless.
+func TestRotateSecret_ReturnsQuicklyEvenWithUnreachableServer(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+
+	const unreachableConfigJSON = `{
+	  "servers": [
+	    {
+	      "name": "Unreachable Server",
+	      "root_connection_string": "postgres://root:pass@10.255.255.1:5999/postgres",
+	      "databases": [
+	        {"database": "mydb", "user": "myuser", "password": "mypass"}
+	      ]
+	    }
+	  ]
+	}`
+	path := makeTestConfig(t, unreachableConfigJSON)
+	h := newAdminHandler(path)
+
+	client := fake.NewSimpleClientset()
+	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	form := url.Values{"server_index": {"0"}, "db_index": {"0"}}
+	req := httptest.NewRequest("POST", "/rotate-secret", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+
+	start := time.Now()
+	h.ServeHTTP(w, req)
+	elapsed := time.Since(start)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("handler took %v; expected it to return quickly without waiting for reprovisioning", elapsed)
 	}
 }
 
