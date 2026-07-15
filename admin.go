@@ -33,6 +33,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
 <head>
   <title>DB Provisioner Admin</title>
   <style>
+    * { box-sizing: border-box; }
     body { font-family: sans-serif; max-width: 1280px; margin: 2rem auto; padding: 0 1rem; }
     table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
     th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
@@ -41,8 +42,8 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     .flash-err { background: #f8d7da; color: #721c24; }
     fieldset { margin-bottom: 1rem; }
     label { display: block; margin-bottom: 0.4rem; }
-    input[type=text], input[type=password], select { width: 300px; padding: 0.2rem; }
-    .layout { display: flex; gap: 2rem; align-items: flex-start; }
+    input[type=text], input[type=password], select { width: 100%; max-width: 300px; padding: 0.2rem; }
+    .layout { display: flex; flex-wrap: wrap; gap: 2rem; align-items: flex-start; }
     .col-left { flex: 2; min-width: 0; }
     .col-right { flex: 1; min-width: 280px; }
   </style>
