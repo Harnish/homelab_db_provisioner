@@ -17,9 +17,17 @@ import (
 	"time"
 )
 
+func backupOrDefault(b *BackupConfig) BackupConfig {
+	if b == nil {
+		return BackupConfig{Schedule: "daily"}
+	}
+	return *b
+}
+
 var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
-	"join":       strings.Join,
-	"secretName": secretNameFor,
+	"join":            strings.Join,
+	"secretName":      secretNameFor,
+	"backupOrDefault": backupOrDefault,
 }).Parse(`<!DOCTYPE html>
 <html>
 <head>
@@ -46,7 +54,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
   {{range $si, $server := .Servers}}
     <h3>{{$server.Name}}</h3>
     <table>
-      <tr><th>Database</th><th>User</th><th>Permissions</th><th>{{if $.K8sEnabled}}Kubernetes Secret{{else}}Change Password{{end}}</th></tr>
+      <tr><th>Database</th><th>User</th><th>Permissions</th><th>{{if $.K8sEnabled}}Kubernetes Secret{{else}}Change Password{{end}}</th><th>Backup</th></tr>
       {{range $di, $db := $server.Databases}}
       <tr>
         <td>{{$db.Database}}</td>
@@ -73,6 +81,21 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
               <button type="submit">Generate</button>
             </form>
           {{end}}
+        </td>
+        <td>
+          {{$backup := backupOrDefault $db.Backup}}
+          <form method="POST" action="/update-backup" style="display:inline-flex;gap:0.4rem;align-items:center;flex-wrap:wrap;">
+            <input type="hidden" name="server_index" value="{{$si}}">
+            <input type="hidden" name="db_index" value="{{$di}}">
+            <label style="display:inline;margin:0;"><input type="checkbox" name="backup_enabled" {{if $backup.Enabled}}checked{{end}}> Enabled</label>
+            <select name="backup_schedule">
+              <option value="daily" {{if eq $backup.Schedule "daily"}}selected{{end}}>daily</option>
+              <option value="weekly" {{if eq $backup.Schedule "weekly"}}selected{{end}}>weekly</option>
+            </select>
+            <input type="number" name="backup_keep_count" value="{{$backup.KeepCount}}" min="0" style="width:60px;">
+            <label style="display:inline;margin:0;"><input type="checkbox" name="backup_restore_on_create" {{if $backup.RestoreOnCreate}}checked{{end}}> Restore on Create</label>
+            <button type="submit">Save</button>
+          </form>
         </td>
       </tr>
       {{end}}
@@ -106,6 +129,15 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
       <label>Username: <input type="text" name="user" required></label>
       <label>Password: <input type="password" name="password" required></label>
       <label>Permissions (comma-separated, blank for ALL): <input type="text" name="permissions"></label>
+      <label><input type="checkbox" name="backup_enabled"> Enable backups</label>
+      <label>Backup schedule:
+        <select name="backup_schedule">
+          <option value="daily">daily</option>
+          <option value="weekly">weekly</option>
+        </select>
+      </label>
+      <label>Backup keep count (0 = keep all): <input type="number" name="backup_keep_count" value="0" min="0"></label>
+      <label><input type="checkbox" name="backup_restore_on_create"> Restore newest backup on create</label>
       <button type="submit">Add Database</button>
     </fieldset>
   </form>

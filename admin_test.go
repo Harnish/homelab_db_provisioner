@@ -738,6 +738,82 @@ func TestAddDatabase_WithBackupConfig(t *testing.T) {
 	}
 }
 
+func TestBackupOrDefault_NilReturnsDaily(t *testing.T) {
+	got := backupOrDefault(nil)
+	want := BackupConfig{Schedule: "daily"}
+	if got != want {
+		t.Errorf("backupOrDefault(nil) = %+v, want %+v", got, want)
+	}
+}
+
+func TestBackupOrDefault_NonNilReturnsCopy(t *testing.T) {
+	b := &BackupConfig{Enabled: true, Schedule: "weekly", KeepCount: 5, RestoreOnCreate: true}
+	got := backupOrDefault(b)
+	want := BackupConfig{Enabled: true, Schedule: "weekly", KeepCount: 5, RestoreOnCreate: true}
+	if got != want {
+		t.Errorf("backupOrDefault(non-nil) = %+v, want %+v", got, want)
+	}
+}
+
+func TestIndex_ShowsBackupColumnDefaultsForNilBackup(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	for _, want := range []string{`name="backup_enabled"`, `name="backup_schedule"`, `name="backup_keep_count"`, `name="backup_restore_on_create"`, `action="/update-backup"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in body", want)
+		}
+	}
+	if strings.Contains(body, `name="backup_enabled" checked`) {
+		t.Error("did not expect backup_enabled to be checked for a nil Backup")
+	}
+}
+
+func TestIndex_ShowsBackupColumnPopulatedForExistingBackup(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigWithBackupJSON))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, `name="backup_enabled" checked`) {
+		t.Error("expected backup_enabled to be checked for an enabled Backup")
+	}
+	if !strings.Contains(body, `value="7"`) {
+		t.Error("expected keep_count value 7 to be rendered")
+	}
+}
+
+func TestIndex_AddDatabaseFormHasBackupFields(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	// The Add Database form and the per-row backup form share field names;
+	// confirm both backup_schedule <select> blocks appear (one per database
+	// row plus one in Add Database), i.e. at least 2 occurrences.
+	if strings.Count(body, `name="backup_schedule"`) < 2 {
+		t.Error("expected backup_schedule field in both the row form and the Add Database form")
+	}
+}
+
 func TestAddDatabase_WithoutBackupConfigStaysNil(t *testing.T) {
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD", "secret")
