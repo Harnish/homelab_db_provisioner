@@ -34,3 +34,13 @@ contents:
 scripts:
   postinstall: ./packaging/postinstall.sh
   preremove: ./packaging/preremove.sh
+
+overrides:
+  deb:
+    depends:
+      - postgresql-client
+      - mariadb-client
+  rpm:
+    depends:
+      - postgresql
+      - mariadb
