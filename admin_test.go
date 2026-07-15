@@ -336,6 +336,138 @@ func TestAddDatabase_InvalidServerIndex(t *testing.T) {
 	}
 }
 
+func TestAddServer_Success(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"name":                    {"New Server"},
+		"root_connection_string": {"postgres://root:pass@newhost/postgres"},
+	}
+	req := httptest.NewRequest("POST", "/add-server", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Servers) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(cfg.Servers))
+	}
+	added := cfg.Servers[1]
+	if added.Name != "New Server" || added.RootConnectionString != "postgres://root:pass@newhost/postgres" {
+		t.Errorf("unexpected server entry: %+v", added)
+	}
+	if added.DryRun {
+		t.Error("expected dry_run false by default")
+	}
+	if len(added.Databases) != 0 {
+		t.Errorf("expected 0 databases on new server, got %d", len(added.Databases))
+	}
+}
+
+func TestAddServer_DryRunChecked(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"name":                    {"New Server"},
+		"root_connection_string": {"postgres://root:pass@newhost/postgres"},
+		"dry_run":                {"on"},
+	}
+	req := httptest.NewRequest("POST", "/add-server", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Servers[1].DryRun {
+		t.Error("expected dry_run true")
+	}
+}
+
+func TestAddServer_MissingName(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	form := url.Values{
+		"name":                    {""},
+		"root_connection_string": {"postgres://root:pass@newhost/postgres"},
+	}
+	req := httptest.NewRequest("POST", "/add-server", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAddServer_MissingConnectionString(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	form := url.Values{
+		"name":                    {"New Server"},
+		"root_connection_string": {""},
+	}
+	req := httptest.NewRequest("POST", "/add-server", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAddServer_WrongMethod(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	req := httptest.NewRequest("GET", "/add-server", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
 func TestIndex_ShowsK8sSecretColumnWhenEnabled(t *testing.T) {
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD", "secret")

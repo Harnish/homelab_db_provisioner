@@ -160,6 +160,7 @@ func newAdminHandler(configPath string) http.Handler {
 	mux.HandleFunc("/rotate-secret", handleRotateSecret(configPath))
 	mux.HandleFunc("/update-backup", handleUpdateBackup(configPath))
 	mux.HandleFunc("/add-database", handleAddDatabase(configPath))
+	mux.HandleFunc("/add-server", handleAddServer(configPath))
 	return basicAuth(mux)
 }
 
@@ -594,5 +595,58 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 			return
 		}
 		http.Redirect(w, r, "/?msg="+url.QueryEscape("Database added"), http.StatusSeeOther)
+	}
+}
+
+func handleAddServer(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+
+		name := r.FormValue("name")
+		rootConnStr := r.FormValue("root_connection_string")
+		if name == "" || rootConnStr == "" {
+			http.Error(w, "name and root_connection_string are required", http.StatusBadRequest)
+			return
+		}
+
+		newServer := DatabaseServer{
+			Name:                 name,
+			RootConnectionString: rootConnStr,
+			DryRun:               r.FormValue("dry_run") == "on",
+			Databases:            []DatabaseConfig{},
+		}
+
+		configMu.Lock()
+		defer configMu.Unlock()
+
+		fileData, err := os.ReadFile(configPath)
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to read config"), http.StatusSeeOther)
+			return
+		}
+		var cfg Config
+		if err := json.Unmarshal(fileData, &cfg); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to parse config"), http.StatusSeeOther)
+			return
+		}
+		cfg.Servers = append(cfg.Servers, newServer)
+
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
+			return
+		}
+		if err := os.WriteFile(configPath, out, 0600); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to write config"), http.StatusSeeOther)
+			return
+		}
+		http.Redirect(w, r, "/?msg="+url.QueryEscape("Server added"), http.StatusSeeOther)
 	}
 }
