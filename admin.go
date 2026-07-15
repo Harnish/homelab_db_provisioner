@@ -33,7 +33,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
 <head>
   <title>DB Provisioner Admin</title>
   <style>
-    body { font-family: sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    body { font-family: sans-serif; max-width: 1280px; margin: 2rem auto; padding: 0 1rem; }
     table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
     th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
     .flash { padding: 0.5rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
@@ -42,6 +42,9 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     fieldset { margin-bottom: 1rem; }
     label { display: block; margin-bottom: 0.4rem; }
     input[type=text], input[type=password], select { width: 300px; padding: 0.2rem; }
+    .layout { display: flex; gap: 2rem; align-items: flex-start; }
+    .col-left { flex: 2; min-width: 0; }
+    .col-right { flex: 1; min-width: 280px; }
   </style>
 </head>
 <body>
@@ -50,6 +53,8 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     <div class="flash {{if .FlashError}}flash-err{{else}}flash-ok{{end}}">{{.Flash}}</div>
   {{end}}
 
+  <div class="layout">
+  <div class="col-left">
   <h2>Current Databases</h2>
   {{range $si, $server := .Servers}}
     <h3>{{$server.Name}}</h3>
@@ -113,7 +118,9 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
       name: &lt;secret-name&gt;
       key: password</pre>
   {{end}}
+  </div>
 
+  <div class="col-right">
   <h2>Add Server</h2>
   <form method="POST" action="/add-server">
     <fieldset>
@@ -152,6 +159,8 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
       <button type="submit">Add Database</button>
     </fieldset>
   </form>
+  </div>
+  </div>
 </body>
 </html>`))
 
