@@ -694,3 +694,82 @@ func TestUpdateBackup_InvalidDBIndex(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
+
+func TestAddDatabase_WithBackupConfig(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index":             {"0"},
+		"database":                 {"newdb"},
+		"user":                     {"newuser"},
+		"password":                 {"newpass"},
+		"backup_enabled":           {"on"},
+		"backup_schedule":          {"weekly"},
+		"backup_keep_count":        {"3"},
+		"backup_restore_on_create": {"on"},
+	}
+	req := httptest.NewRequest("POST", "/add-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	added := cfg.Servers[0].Databases[1]
+	if added.Backup == nil {
+		t.Fatal("expected Backup to be set")
+	}
+	if !added.Backup.Enabled || added.Backup.Schedule != "weekly" || added.Backup.KeepCount != 3 || !added.Backup.RestoreOnCreate {
+		t.Errorf("unexpected backup config: %+v", added.Backup)
+	}
+}
+
+func TestAddDatabase_WithoutBackupConfigStaysNil(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index": {"0"},
+		"database":     {"newdb"},
+		"user":         {"newuser"},
+		"password":     {"newpass"},
+	}
+	req := httptest.NewRequest("POST", "/add-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	added := cfg.Servers[0].Databases[1]
+	if added.Backup != nil {
+		t.Errorf("expected Backup to stay nil when no backup fields are submitted, got %+v", added.Backup)
+	}
+}

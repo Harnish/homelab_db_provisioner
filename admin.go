@@ -541,12 +541,16 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 			return
 		}
 
-		cfg.Servers[si].Databases = append(cfg.Servers[si].Databases, DatabaseConfig{
+		newDB := DatabaseConfig{
 			Database:    database,
 			User:        user,
 			Password:    r.FormValue("password"),
 			Permissions: permissions,
-		})
+		}
+		if backup := parseBackupFields(r); backup.Enabled || backup.RestoreOnCreate || backup.KeepCount != 0 {
+			newDB.Backup = &backup
+		}
+		cfg.Servers[si].Databases = append(cfg.Servers[si].Databases, newDB)
 
 		out, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
