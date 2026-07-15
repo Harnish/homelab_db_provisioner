@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -161,6 +162,51 @@ func TestRotateSecret_CreatesWhenMissing(t *testing.T) {
 	}
 	if string(secret.Data["password"]) != password {
 		t.Errorf("secret password = %q, want %q", secret.Data["password"], password)
+	}
+}
+
+// TestProcessConfig_DryRunSkipsK8sSecretReconciliation exercises the
+// dry-run gate added around applyK8sPassword in processConfig's MongoDB
+// loop. There's no real Mongo/Postgres/MariaDB available in tests (an
+// existing, accepted limitation of this codebase), so this uses the
+// MongoDB path with a deliberately host-less "mongodb://" connection
+// string: mongo.Connect fails synchronously on URI parsing ("must have
+// at least 1 host") without any network I/O, so the test stays fast and
+// hermetic while still driving processConfig's real per-database loop.
+//
+// Before the fix, applyK8sPassword ran unconditionally before the
+// server.DryRun-gated provisioning call, so a dry-run server would still
+// create a real Kubernetes Secret. This test would fail against that
+// prior behavior (the fake clientset would happily create the secret
+// regardless of Mongo connectivity) and passes with the fix, which skips
+// the k8s reconciliation entirely when server.DryRun is true.
+func TestProcessConfig_DryRunSkipsK8sSecretReconciliation(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	cfg := &Config{
+		Servers: []DatabaseServer{
+			{
+				Name:                 "Dry Run Mongo",
+				RootConnectionString: "mongodb://",
+				DryRun:               true,
+				Databases: []DatabaseConfig{
+					{Database: "app_db", User: "app_user", Password: "from-config"},
+				},
+			},
+		},
+	}
+
+	if err := processConfig(cfg); err != nil {
+		t.Fatalf("processConfig() error = %v", err)
+	}
+
+	name := secretNameFor("Dry Run Mongo", "app_db")
+	if _, err := client.CoreV1().Secrets("default").Get(context.Background(), name, metav1.GetOptions{}); err == nil {
+		t.Fatalf("expected no Kubernetes secret %s to be created in dry-run mode", name)
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("unexpected error checking for secret: %v", err)
 	}
 }
 

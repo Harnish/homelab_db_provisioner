@@ -270,13 +270,17 @@ func processConfig(config *Config) error {
 			for i, dbConfig := range server.Databases {
 				log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
 
-				var k8sErr error
-				k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, dbConfig)
-				k8sCancel()
-				if k8sErr != nil {
-					log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
-					continue
+				if server.DryRun {
+					log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)
+				} else {
+					var k8sErr error
+					k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, dbConfig)
+					k8sCancel()
+					if k8sErr != nil {
+						log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
+						continue
+					}
 				}
 
 				created, provErr := provisionMongoDB(server.RootConnectionString, dbConfig, server.DryRun)
@@ -318,13 +322,17 @@ func processConfig(config *Config) error {
 		for i, dbConfig := range server.Databases {
 			log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
 
-			var k8sErr error
-			k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, dbConfig)
-			k8sCancel()
-			if k8sErr != nil {
-				log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
-				continue
+			if server.DryRun {
+				log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)
+			} else {
+				var k8sErr error
+				k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, dbConfig)
+				k8sCancel()
+				if k8sErr != nil {
+					log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
+					continue
+				}
 			}
 
 			var created bool
