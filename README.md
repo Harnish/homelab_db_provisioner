@@ -363,6 +363,7 @@ Then open `http://localhost:8080` in your browser. You will be prompted for the 
 - View all configured databases across all servers
 - Change the password for any existing database user
 - Add a new database entry to any server (with optional custom permissions)
+- Edit each database's backup settings (enabled, schedule, keep count, restore-on-create) — see [Backups](#backups) for what these fields do
 
 > **Note:** The admin UI is most useful with `WATCH_MODE=true`. In one-shot mode the process exits after the first run and the UI has no time to apply changes.
 
