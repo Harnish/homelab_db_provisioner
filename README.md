@@ -367,6 +367,83 @@ Then open `http://localhost:8080` in your browser. You will be prompted for the 
 
 > **Note:** The admin UI is most useful with `WATCH_MODE=true`. In one-shot mode the process exits after the first run and the UI has no time to apply changes.
 
+### JSON API
+
+Every admin action is also available as a JSON API under `/api/servers`, using the same `ADMIN_USER`/`ADMIN_PASSWORD` Basic Auth credentials as the web UI. Useful for scripting.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/servers` | List all servers (with nested databases) |
+| `GET` | `/api/servers/{si}` | Get one server |
+| `POST` | `/api/servers` | Create a server |
+| `PATCH` | `/api/servers/{si}` | Update a server |
+| `DELETE` | `/api/servers/{si}` | Delete a server (and its databases) |
+| `GET` | `/api/servers/{si}/databases` | List databases on a server |
+| `GET` | `/api/servers/{si}/databases/{di}` | Get one database |
+| `POST` | `/api/servers/{si}/databases` | Create a database |
+| `PATCH` | `/api/servers/{si}/databases/{di}` | Update a database |
+| `DELETE` | `/api/servers/{si}/databases/{di}` | Delete a database entry |
+
+`{si}` and `{di}` are array indices (0-based), the same ones used by the web UI's `server_index`/`db_index` form fields. They are not stable IDs — deleting an earlier entry shifts the indices after it. Responses never include the `password` field, matching the web UI (which also never displays a stored password).
+
+> **Note:** `DELETE` only removes the entry from `config.json`. It does not run `DROP DATABASE`/`DROP USER` against the real server — dropping the actual database/user is intentionally out of scope.
+
+**List servers:**
+
+```bash
+curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" http://localhost:8080/api/servers | jq
+```
+
+**Create a server:**
+
+```bash
+curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" -X POST http://localhost:8080/api/servers \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Prod Postgres","root_connection_string":"postgres://root:pass@host:5432/postgres"}'
+```
+
+**Update a server** (only send the fields you want to change):
+
+```bash
+curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" -X PATCH http://localhost:8080/api/servers/0 \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run":true}'
+```
+
+**Delete a server:**
+
+```bash
+curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" -X DELETE http://localhost:8080/api/servers/0
+```
+
+**List databases on a server:**
+
+```bash
+curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" http://localhost:8080/api/servers/0/databases | jq
+```
+
+**Create a database:**
+
+```bash
+curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" -X POST http://localhost:8080/api/servers/0/databases \
+  -H "Content-Type: application/json" \
+  -d '{"database":"myapp","user":"myapp_user","password":"s3cret","permissions":["SELECT","INSERT","UPDATE"]}'
+```
+
+**Update a database** (e.g. rotate password and enable weekly backups):
+
+```bash
+curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" -X PATCH http://localhost:8080/api/servers/0/databases/0 \
+  -H "Content-Type: application/json" \
+  -d '{"password":"newsecret","backup":{"enabled":true,"schedule":"weekly","keep_count":4}}'
+```
+
+**Delete a database entry:**
+
+```bash
+curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" -X DELETE http://localhost:8080/api/servers/0/databases/0
+```
+
 ## Kubernetes Secrets Mode
 
 When `USE_KUBERNETES_SECRETS=true`, the provisioner ignores the `password`
