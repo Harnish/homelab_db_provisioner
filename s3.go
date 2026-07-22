@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -104,4 +105,61 @@ func pruneS3Backups(ctx context.Context, client *s3.Client, cfg *S3Config, serve
 		}
 	}
 	return nil
+}
+
+func newestKey(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	sorted := append([]string(nil), keys...)
+	sort.Strings(sorted)
+	return sorted[len(sorted)-1]
+}
+
+func downloadNewestFromS3(ctx context.Context, client *s3.Client, cfg *S3Config, serverSlug, database, localDestDir string) (string, error) {
+	prefix := s3KeyPrefix(cfg, serverSlug, database) + "/"
+	out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket: &cfg.Bucket,
+		Prefix: &prefix,
+	})
+	if err != nil {
+		return "", fmt.Errorf("list objects %s: %w", prefix, err)
+	}
+
+	keys := make([]string, 0, len(out.Contents))
+	for _, obj := range out.Contents {
+		keys = append(keys, *obj.Key)
+	}
+
+	key := newestKey(keys)
+	if key == "" {
+		return "", nil
+	}
+
+	if err := os.MkdirAll(localDestDir, 0750); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", localDestDir, err)
+	}
+
+	getOut, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: &cfg.Bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return "", fmt.Errorf("get object %s: %w", key, err)
+	}
+	defer getOut.Body.Close()
+
+	localPath := filepath.Join(localDestDir, filepath.Base(key))
+	f, err := os.Create(localPath)
+	if err != nil {
+		return "", fmt.Errorf("create local file: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, getOut.Body); err != nil {
+		return "", fmt.Errorf("write local file: %w", err)
+	}
+
+	log.Printf("restore: downloaded s3://%s/%s to %s", cfg.Bucket, key, localPath)
+	return localPath, nil
 }

@@ -2,6 +2,34 @@ package main
 
 import "testing"
 
+func TestNewestKey(t *testing.T) {
+	tests := []struct {
+		name string
+		keys []string
+		want string
+	}{
+		{name: "empty", keys: nil, want: ""},
+		{
+			name: "unsorted input picks lexicographically newest",
+			keys: []string{
+				"a/db_2026-01-02.sql.gz",
+				"a/db_2026-01-05.sql.gz",
+				"a/db_2026-01-01.sql.gz",
+			},
+			want: "a/db_2026-01-05.sql.gz",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := newestKey(tt.keys)
+			if got != tt.want {
+				t.Errorf("newestKey() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSelectKeysToDelete(t *testing.T) {
 	tests := []struct {
 		name      string
