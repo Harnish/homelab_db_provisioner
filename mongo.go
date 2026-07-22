@@ -196,6 +196,16 @@ func mongoDBBackupSchedule(config *Config, configPath string, t time.Time, s3Cli
 			if db.Backup.KeepCount > 0 {
 				pruneMongoDBBackups(dir, db.Database, db.Backup.KeepCount)
 			}
+
+			if config.S3 != nil && s3Client != nil {
+				ctx := context.Background()
+				slug := slugify(server.Name)
+				if err := uploadToS3(ctx, s3Client, config.S3, slug, db.Database, filename); err != nil {
+					log.Printf("backup: s3 upload %s/%s: %v", server.Name, db.Database, err)
+				} else if err := pruneS3Backups(ctx, s3Client, config.S3, slug, db.Database, db.Backup.KeepCount); err != nil {
+					log.Printf("backup: s3 prune %s/%s: %v", server.Name, db.Database, err)
+				}
+			}
 		}
 	}
 }
