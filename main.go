@@ -298,7 +298,7 @@ func processConfig(config *Config) error {
 				}
 
 				if created && !server.DryRun && dbConfig.Backup != nil && dbConfig.Backup.RestoreOnCreate {
-					restoreDatabase(server, dbConfig, getConfigPath())
+					restoreDatabase(config, server, dbConfig, getConfigPath())
 				}
 
 				log.Printf("Successfully provisioned MongoDB database: %s with user: %s on %s", dbConfig.Database, dbConfig.User, serverName)
@@ -356,7 +356,7 @@ func processConfig(config *Config) error {
 			}
 
 			if created && !server.DryRun && dbConfig.Backup != nil && dbConfig.Backup.RestoreOnCreate {
-				restoreDatabase(server, dbConfig, getConfigPath())
+				restoreDatabase(config, server, dbConfig, getConfigPath())
 			}
 
 			log.Printf("Successfully provisioned database: %s with user: %s on %s", dbConfig.Database, dbConfig.User, serverName)

@@ -208,9 +208,9 @@ func pruneBackups(dir, database string, keepCount int) {
 	}
 }
 
-func restoreDatabase(server DatabaseServer, db DatabaseConfig, configPath string) {
+func restoreDatabase(config *Config, server DatabaseServer, db DatabaseConfig, configPath string) {
 	dbType := detectDBType(server.RootConnectionString)
-	backupFile := findNewestBackup(configPath, server.Name, db.Database, dbType)
+	backupFile := findNewestBackup(config, configPath, server.Name, db.Database, dbType)
 	if backupFile == "" {
 		log.Printf("restore: no backup found for %s/%s, skipping", server.Name, db.Database)
 		return
@@ -234,7 +234,7 @@ func restoreDatabase(server DatabaseServer, db DatabaseConfig, configPath string
 	}
 }
 
-func findNewestBackup(configPath, serverName, database string, dbType DBType) string {
+func findNewestBackup(config *Config, configPath, serverName, database string, dbType DBType) string {
 	dir := filepath.Join(filepath.Dir(configPath), "backups", slugify(serverName), database)
 
 	var pattern string
@@ -245,11 +245,28 @@ func findNewestBackup(configPath, serverName, database string, dbType DBType) st
 	}
 
 	files, err := filepath.Glob(pattern)
-	if err != nil || len(files) == 0 {
+	if err == nil && len(files) > 0 {
+		sort.Strings(files)
+		return files[len(files)-1]
+	}
+
+	if config == nil || config.S3 == nil {
 		return ""
 	}
-	sort.Strings(files)
-	return files[len(files)-1]
+
+	ctx := context.Background()
+	client, err := newS3Client(ctx, config.S3)
+	if err != nil {
+		log.Printf("restore: s3 client: %v", err)
+		return ""
+	}
+
+	localPath, err := downloadNewestFromS3(ctx, client, config.S3, slugify(serverName), database, dir)
+	if err != nil {
+		log.Printf("restore: s3 download %s/%s: %v", serverName, database, err)
+		return ""
+	}
+	return localPath
 }
 
 func restorePostgreSQL(rootConnStr, database, backupFile string) error {
