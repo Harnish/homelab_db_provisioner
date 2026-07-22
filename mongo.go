@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -160,7 +161,7 @@ func parseMongoDBConnStr(connStr string) (map[string]string, error) {
 
 // mongoDBBackupSchedule schedules MongoDB backups in the runBackups function
 // This is called from runBackups in backup.go
-func mongoDBBackupSchedule(config *Config, configPath string, t time.Time) {
+func mongoDBBackupSchedule(config *Config, configPath string, t time.Time, s3Client *s3.Client) {
 	isWeeklyDay := t.Weekday() == time.Sunday
 	backupBase := filepath.Join(filepath.Dir(configPath), "backups")
 

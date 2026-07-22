@@ -2,6 +2,7 @@ package main
 
 import (
 	"compress/gzip"
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 func startBackupScheduler(configPath string) {
@@ -36,12 +39,22 @@ func runBackups(config *Config, configPath string, t time.Time) {
 	isWeeklyDay := t.Weekday() == time.Sunday
 	backupBase := filepath.Join(filepath.Dir(configPath), "backups")
 
+	var s3Client *s3.Client
+	if config.S3 != nil {
+		client, err := newS3Client(context.Background(), config.S3)
+		if err != nil {
+			log.Printf("backup: s3 client: %v", err)
+		} else {
+			s3Client = client
+		}
+	}
+
 	for _, server := range config.Servers {
 		dbType := detectDBType(server.RootConnectionString)
 
 		// Handle MongoDB separately
 		if dbType == MongoDB {
-			mongoDBBackupSchedule(config, configPath, t)
+			mongoDBBackupSchedule(config, configPath, t, s3Client)
 			continue
 		}
 
@@ -77,6 +90,16 @@ func runBackups(config *Config, configPath string, t time.Time) {
 			log.Printf("backup: created %s", filename)
 			if db.Backup.KeepCount > 0 {
 				pruneBackups(dir, db.Database, db.Backup.KeepCount)
+			}
+
+			if config.S3 != nil && s3Client != nil {
+				ctx := context.Background()
+				slug := slugify(server.Name)
+				if err := uploadToS3(ctx, s3Client, config.S3, slug, db.Database, filename); err != nil {
+					log.Printf("backup: s3 upload %s/%s: %v", server.Name, db.Database, err)
+				} else if err := pruneS3Backups(ctx, s3Client, config.S3, slug, db.Database, db.Backup.KeepCount); err != nil {
+					log.Printf("backup: s3 prune %s/%s: %v", server.Name, db.Database, err)
+				}
 			}
 		}
 	}
