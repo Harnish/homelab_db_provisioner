@@ -70,6 +70,8 @@ Config writes use `json.MarshalIndent` and `os.WriteFile` with `0600` permission
 
 The Dockerfile final stage uses `alpine:3.24` (instead of distroless) to provide `pg_dump` (`postgresql18-client`) and `mysqldump` (`mariadb-client`). MongoDB tools (`mongodump`/`mongorestore`) are not bundled and must be installed separately.
 
+When `Config.S3` is set (top-level `s3` block: `bucket`, `region`, optional `endpoint` for MinIO/S3-compatible targets, optional `prefix`), every successful local backup is also uploaded to `s3://{bucket}/{prefix}/{server-slug}/{database}/{filename}` and pruned to the same `keep_count` as the local copy. S3 credentials come from the environment (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/etc., the AWS SDK default chain) — never from `config.json`. If `restore_on_create` triggers a restore and no local backup file exists (e.g. a fresh container with an empty `backups/` volume), `findNewestBackup` falls back to downloading the newest object from S3. All S3 operations are logged and non-fatal; local backup/restore is unaffected if S3 is unreachable or unconfigured.
+
 ### Dry-run mode
 
 Each `DatabaseServer` has an optional `dry_run: true` field. When set, all SQL statements are logged with `[DRY RUN]` prefix but not executed.

@@ -36,5 +36,11 @@
         }
       ]
     }
-  ]
+  ],
+  "s3": {
+    "bucket": "homelab-db-backups",
+    "region": "us-east-1",
+    "endpoint": "",
+    "prefix": "homelab"
+  }
 }
