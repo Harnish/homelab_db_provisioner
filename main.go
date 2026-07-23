@@ -26,6 +26,13 @@ type BackupConfig struct {
 	RestoreOnCreate bool   `json:"restore_on_create"` // restore newest backup when db is newly created
 }
 
+type S3Config struct {
+	Bucket   string `json:"bucket"`
+	Region   string `json:"region"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Prefix   string `json:"prefix,omitempty"`
+}
+
 type DatabaseConfig struct {
 	Database    string        `json:"database"`
 	User        string        `json:"user"`
@@ -44,6 +51,7 @@ type DatabaseServer struct {
 
 type Config struct {
 	Servers []DatabaseServer `json:"servers"`
+	S3      *S3Config        `json:"s3,omitempty"`
 }
 
 type DBType int
@@ -290,7 +298,7 @@ func processConfig(config *Config) error {
 				}
 
 				if created && !server.DryRun && dbConfig.Backup != nil && dbConfig.Backup.RestoreOnCreate {
-					restoreDatabase(server, dbConfig, getConfigPath())
+					restoreDatabase(config, server, dbConfig, getConfigPath())
 				}
 
 				log.Printf("Successfully provisioned MongoDB database: %s with user: %s on %s", dbConfig.Database, dbConfig.User, serverName)
@@ -348,7 +356,7 @@ func processConfig(config *Config) error {
 			}
 
 			if created && !server.DryRun && dbConfig.Backup != nil && dbConfig.Backup.RestoreOnCreate {
-				restoreDatabase(server, dbConfig, getConfigPath())
+				restoreDatabase(config, server, dbConfig, getConfigPath())
 			}
 
 			log.Printf("Successfully provisioned database: %s with user: %s on %s", dbConfig.Database, dbConfig.User, serverName)
