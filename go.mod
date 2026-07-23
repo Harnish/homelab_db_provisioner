@@ -3,11 +3,13 @@ module github.com/yourusername/homelab-db-provisioner
 go 1.26.0
 
 require (
+	github.com/aws/aws-sdk-go-v2/config v1.32.31
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/lib/pq v1.12.3
 	go.mongodb.org/mongo-driver v1.17.9
 	k8s.io/api v0.36.2
-	k8s.io/apimachinery v0.36.2
+	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.2
 )
 
@@ -15,7 +17,6 @@ require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.43.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
-	github.com/aws/aws-sdk-go-v2/config v1.32.31 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.30 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.31 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.31 // indirect
@@ -25,7 +26,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.24 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.31 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.32 // indirect
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.5.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.33.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.0 // indirect
@@ -73,6 +73,6 @@ require (
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
-	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
+	sigs.k8s.io/structured-merge-diff/v6 v6.3.3 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
