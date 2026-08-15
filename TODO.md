@@ -3,4 +3,4 @@
 - [x] **Systemd files** - create a systemd file for this to run on a server if not in k8s
 - [X] **Github action to build packages** - rpm and debs for arm and amd64
 - [ ] **Package Dependencies** - this needs the appropriate backup tools like pgdump to work, need to set the dependencies for the rpm/deb packages.
-- [ ] **`requires_connect_string: true` DatabaseConfig option** - when set, the provisioner builds the full connection string (e.g. `postgres://user:pass@host:port/db`) itself and stores it in the managed Kubernetes secret (`secretNameFor`) alongside `password`, e.g. under a `connection_string` key, so consumers (like myk's deploy-time secretizer) reference it from the secret instead of assembling or embedding it themselves.
+- [x] **`requires_connect_string: true` DatabaseConfig option** - when set, the provisioner builds the full connection string (e.g. `postgres://user:pass@host:port/db`) itself and stores it in the managed Kubernetes secret (`secretNameFor`) alongside `password`, e.g. under a `connection_string` key, so consumers (like myk's deploy-time secretizer) reference it from the secret instead of assembling or embedding it themselves.

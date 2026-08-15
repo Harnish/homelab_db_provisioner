@@ -20,7 +20,7 @@ func TestApplyK8sPassword_MultipleDatabasesGetDistinctSecrets(t *testing.T) {
 
 	var resolved []DatabaseConfig
 	for _, db := range dbs {
-		got, err := applyK8sPassword(context.Background(), "Main PostgreSQL", db)
+		got, err := applyK8sPassword(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", db)
 		if err != nil {
 			t.Fatalf("applyK8sPassword(%s) error = %v", db.Database, err)
 		}

@@ -110,6 +110,7 @@ Create a `config.json` file with your database server configurations. You can ma
     - `database`: Name of the database to create
     - `user`: Username to create/manage
     - `password`: Password for the user
+    - `requires_connect_string`: `true` to also store a full connection string (e.g. `postgres://user:pass@host:port/db`) under the `connection_string` key of the managed Kubernetes Secret. Only takes effect when `USE_KUBERNETES_SECRETS=true` — see [Kubernetes Secrets Mode](#kubernetes-secrets-mode).
     - `extensions`: Optional list of PostgreSQL extensions to install in the database (e.g. `["uuid-ossp", "pgcrypto"]`). Each extension is created with `CREATE EXTENSION IF NOT EXISTS`. Not supported for MariaDB.
     - `backup`: Optional backup configuration (see [Backups](#backups))
       - `enabled`: `true` to enable scheduled backups
@@ -468,7 +469,21 @@ One Secret is created per database entry, named:
 
 For example, a server named `"Main PostgreSQL"` with a database `"app_db"`
 gets a Secret named `main-postgresql-app-db-credentials`. Each Secret has a
-single key: `password`.
+`password` key, plus a `connection_string` key when that database's
+`requires_connect_string` is `true` (see below).
+
+### Storing a full connection string
+
+Set `requires_connect_string: true` on a database entry to have the
+provisioner also write a ready-to-use connection string — e.g.
+`postgres://app_user:<password>@host:5432/app_db` — into the
+`connection_string` key of that database's Secret, built from the server's
+`root_connection_string` host/port plus the managed user/password/database.
+This saves downstream consumers (deploy-time secret injectors, etc.) from
+having to assemble or embed the URL themselves. If the flag is turned on
+after the Secret already exists, the key is backfilled in on the next run.
+Rotating the secret from the admin UI (`POST /rotate-secret`) refreshes
+`connection_string` along with `password`.
 
 ### Required RBAC
 

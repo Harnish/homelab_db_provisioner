@@ -34,12 +34,13 @@ type S3Config struct {
 }
 
 type DatabaseConfig struct {
-	Database    string        `json:"database"`
-	User        string        `json:"user"`
-	Password    string        `json:"password"`
-	Permissions []string      `json:"permissions"`
-	Extensions  []string      `json:"extensions,omitempty"`
-	Backup      *BackupConfig `json:"backup,omitempty"`
+	Database              string        `json:"database"`
+	User                  string        `json:"user"`
+	Password              string        `json:"password"`
+	Permissions           []string      `json:"permissions"`
+	Extensions            []string      `json:"extensions,omitempty"`
+	Backup                *BackupConfig `json:"backup,omitempty"`
+	RequiresConnectString bool          `json:"requires_connect_string,omitempty"`
 }
 
 type DatabaseServer struct {
@@ -280,10 +281,13 @@ func processConfig(config *Config) error {
 
 				if server.DryRun {
 					log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)
+					if dbConfig.RequiresConnectString {
+						log.Printf("[DRY RUN] Would store connection_string in Kubernetes secret %s for %s on %s", secretNameFor(serverName, dbConfig.Database), dbConfig.Database, serverName)
+					}
 				} else {
 					var k8sErr error
 					k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
-					dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, dbConfig)
+					dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, server.RootConnectionString, dbConfig)
 					k8sCancel()
 					if k8sErr != nil {
 						log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
@@ -332,10 +336,13 @@ func processConfig(config *Config) error {
 
 			if server.DryRun {
 				log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)
+				if dbConfig.RequiresConnectString {
+					log.Printf("[DRY RUN] Would store connection_string in Kubernetes secret %s for %s on %s", secretNameFor(serverName, dbConfig.Database), dbConfig.Database, serverName)
+				}
 			} else {
 				var k8sErr error
 				k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, dbConfig)
+				dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, server.RootConnectionString, dbConfig)
 				k8sCancel()
 				if k8sErr != nil {
 					log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)

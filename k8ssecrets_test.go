@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -34,7 +38,7 @@ func TestReconcilePassword_CreatesWhenMissing(t *testing.T) {
 	m := &k8sSecretsManager{client: client, namespace: "default"}
 
 	db := DatabaseConfig{Database: "app_db", User: "app_user", Password: "ignored-from-config"}
-	password, err := m.reconcilePassword(context.Background(), "Main PostgreSQL", db)
+	password, err := m.reconcilePassword(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", db)
 	if err != nil {
 		t.Fatalf("reconcilePassword() error = %v", err)
 	}
@@ -51,6 +55,60 @@ func TestReconcilePassword_CreatesWhenMissing(t *testing.T) {
 	}
 }
 
+func TestReconcilePassword_CreatesWithConnectionStringWhenRequired(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	m := &k8sSecretsManager{client: client, namespace: "default"}
+
+	db := DatabaseConfig{Database: "app_db", User: "app_user", RequiresConnectString: true}
+	password, err := m.reconcilePassword(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", db)
+	if err != nil {
+		t.Fatalf("reconcilePassword() error = %v", err)
+	}
+
+	secret, err := client.CoreV1().Secrets("default").Get(context.Background(), "main-postgresql-app-db-credentials", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected secret to be created: %v", err)
+	}
+	// generatePassword's charset includes reserved URL characters (@ # % &),
+	// so compare structurally via url.Parse rather than raw string equality
+	// (a percent-encoded password won't string-match the raw one).
+	got, err := url.Parse(string(secret.Data["connection_string"]))
+	if err != nil {
+		t.Fatalf("connection_string is not a valid URL: %v", err)
+	}
+	if got.Scheme != "postgres" || got.Host != "localhost:5432" || got.Path != "/app_db" {
+		t.Errorf("connection_string = %q, want scheme=postgres host=localhost:5432 path=/app_db", got)
+	}
+	if got.User.Username() != "app_user" {
+		t.Errorf("connection_string user = %q, want %q", got.User.Username(), "app_user")
+	}
+	if pw, _ := got.User.Password(); pw != password {
+		t.Errorf("connection_string password = %q, want %q", pw, password)
+	}
+}
+
+func TestReconcilePassword_BackfillsConnectionStringOnExisting(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "main-postgresql-app-db-credentials", Namespace: "default"},
+		Data:       map[string][]byte{"password": []byte("existing-secret-password")},
+	})
+	m := &k8sSecretsManager{client: client, namespace: "default"}
+
+	db := DatabaseConfig{Database: "app_db", User: "app_user", RequiresConnectString: true}
+	if _, err := m.reconcilePassword(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", db); err != nil {
+		t.Fatalf("reconcilePassword() error = %v", err)
+	}
+
+	secret, err := client.CoreV1().Secrets("default").Get(context.Background(), "main-postgresql-app-db-credentials", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	want := "postgres://app_user:existing-secret-password@localhost:5432/app_db"
+	if string(secret.Data["connection_string"]) != want {
+		t.Errorf("connection_string = %q, want %q", secret.Data["connection_string"], want)
+	}
+}
+
 func TestReconcilePassword_ReusesExisting(t *testing.T) {
 	client := fake.NewSimpleClientset(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "main-postgresql-app-db-credentials", Namespace: "default"},
@@ -59,7 +117,7 @@ func TestReconcilePassword_ReusesExisting(t *testing.T) {
 	m := &k8sSecretsManager{client: client, namespace: "default"}
 
 	db := DatabaseConfig{Database: "app_db", User: "app_user"}
-	password, err := m.reconcilePassword(context.Background(), "Main PostgreSQL", db)
+	password, err := m.reconcilePassword(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", db)
 	if err != nil {
 		t.Fatalf("reconcilePassword() error = %v", err)
 	}
@@ -76,7 +134,7 @@ func TestReconcilePassword_SecretMissingPasswordKey(t *testing.T) {
 	m := &k8sSecretsManager{client: client, namespace: "default"}
 
 	db := DatabaseConfig{Database: "app_db"}
-	if _, err := m.reconcilePassword(context.Background(), "Main PostgreSQL", db); err == nil {
+	if _, err := m.reconcilePassword(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", db); err == nil {
 		t.Fatal("expected error when secret has no password key")
 	}
 }
@@ -84,7 +142,7 @@ func TestReconcilePassword_SecretMissingPasswordKey(t *testing.T) {
 func TestApplyK8sPassword_NoManagerReturnsUnchanged(t *testing.T) {
 	secretsManager = nil
 	db := DatabaseConfig{Database: "app_db", Password: "from-config"}
-	got, err := applyK8sPassword(context.Background(), "Main PostgreSQL", db)
+	got, err := applyK8sPassword(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", db)
 	if err != nil {
 		t.Fatalf("applyK8sPassword() error = %v", err)
 	}
@@ -99,7 +157,7 @@ func TestApplyK8sPassword_OverridesFromSecret(t *testing.T) {
 	defer func() { secretsManager = nil }()
 
 	db := DatabaseConfig{Database: "app_db", Password: "from-config"}
-	got, err := applyK8sPassword(context.Background(), "Main PostgreSQL", db)
+	got, err := applyK8sPassword(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", db)
 	if err != nil {
 		t.Fatalf("applyK8sPassword() error = %v", err)
 	}
@@ -117,7 +175,7 @@ func TestApplyK8sPassword_PropagatesError(t *testing.T) {
 	defer func() { secretsManager = nil }()
 
 	db := DatabaseConfig{Database: "app_db", Password: "from-config"}
-	_, err := applyK8sPassword(context.Background(), "Main PostgreSQL", db)
+	_, err := applyK8sPassword(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", db)
 	if err == nil {
 		t.Fatal("expected error to propagate from reconcilePassword")
 	}
@@ -130,7 +188,7 @@ func TestRotateSecret_UpdatesExisting(t *testing.T) {
 	})
 	m := &k8sSecretsManager{client: client, namespace: "default"}
 
-	newPassword, err := m.rotateSecret(context.Background(), "Main PostgreSQL", "app_db")
+	newPassword, err := m.rotateSecret(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", DatabaseConfig{Database: "app_db", User: "app_user"})
 	if err != nil {
 		t.Fatalf("rotateSecret() error = %v", err)
 	}
@@ -151,7 +209,7 @@ func TestRotateSecret_CreatesWhenMissing(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	m := &k8sSecretsManager{client: client, namespace: "default"}
 
-	password, err := m.rotateSecret(context.Background(), "Main PostgreSQL", "app_db")
+	password, err := m.rotateSecret(context.Background(), "Main PostgreSQL", "postgres://root:root@localhost:5432/postgres", DatabaseConfig{Database: "app_db", User: "app_user"})
 	if err != nil {
 		t.Fatalf("rotateSecret() error = %v", err)
 	}
@@ -207,6 +265,42 @@ func TestProcessConfig_DryRunSkipsK8sSecretReconciliation(t *testing.T) {
 		t.Fatalf("expected no Kubernetes secret %s to be created in dry-run mode", name)
 	} else if !apierrors.IsNotFound(err) {
 		t.Fatalf("unexpected error checking for secret: %v", err)
+	}
+}
+
+// TestProcessConfig_DryRunLogsRequiresConnectString checks that dry-run mode
+// logs the intent to store a connection_string key when
+// DatabaseConfig.RequiresConnectString is set, without actually reconciling
+// a Kubernetes secret (dry-run still skips applyK8sPassword entirely).
+func TestProcessConfig_DryRunLogsRequiresConnectString(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	cfg := &Config{
+		Servers: []DatabaseServer{
+			{
+				Name:                 "Dry Run Mongo",
+				RootConnectionString: "mongodb://",
+				DryRun:               true,
+				Databases: []DatabaseConfig{
+					{Database: "app_db", User: "app_user", Password: "from-config", RequiresConnectString: true},
+				},
+			},
+		},
+	}
+
+	if err := processConfig(cfg); err != nil {
+		t.Fatalf("processConfig() error = %v", err)
+	}
+
+	want := "Would store connection_string in Kubernetes secret " + secretNameFor("Dry Run Mongo", "app_db")
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("expected dry-run log to contain %q, got: %s", want, buf.String())
 	}
 }
 

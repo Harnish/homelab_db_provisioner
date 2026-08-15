@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 
@@ -18,6 +19,21 @@ func secretNameFor(serverName, database string) string {
 	return fmt.Sprintf("%s-%s-credentials", slugify(serverName), slugify(database))
 }
 
+// buildConnectString rebuilds rootConnStr with db's own credentials and
+// database name, keeping the original scheme/host/port. Works for
+// postgres://, mariadb://, mysql://, and mongodb:// alike since they're all
+// plain URLs at this level (the driver-specific DSN conversion in
+// processConfig happens separately, only for the actual driver connection).
+func buildConnectString(rootConnStr string, db DatabaseConfig, password string) (string, error) {
+	u, err := url.Parse(rootConnStr)
+	if err != nil {
+		return "", fmt.Errorf("parse root connection string: %w", err)
+	}
+	u.User = url.UserPassword(db.User, password)
+	u.Path = "/" + db.Database
+	return u.String(), nil
+}
+
 // k8sSecretsManager reconciles per-database passwords against Kubernetes Secrets.
 // client is kubernetes.Interface (not *kubernetes.Clientset) so tests can inject a fake clientset.
 type k8sSecretsManager struct {
@@ -30,7 +46,7 @@ var secretsManager *k8sSecretsManager
 
 const k8sManagedByLabel = "app.kubernetes.io/managed-by"
 
-func (m *k8sSecretsManager) reconcilePassword(ctx context.Context, serverName string, db DatabaseConfig) (string, error) {
+func (m *k8sSecretsManager) reconcilePassword(ctx context.Context, serverName, rootConnStr string, db DatabaseConfig) (string, error) {
 	name := secretNameFor(serverName, db.Database)
 
 	secret, err := m.client.CoreV1().Secrets(m.namespace).Get(ctx, name, metav1.GetOptions{})
@@ -38,6 +54,18 @@ func (m *k8sSecretsManager) reconcilePassword(ctx context.Context, serverName st
 		pw, ok := secret.Data["password"]
 		if !ok || len(pw) == 0 {
 			return "", fmt.Errorf("secret %s exists but has no password key", name)
+		}
+		if db.RequiresConnectString && len(secret.Data["connection_string"]) == 0 {
+			connStr, err := buildConnectString(rootConnStr, db, string(pw))
+			if err != nil {
+				return "", fmt.Errorf("build connection string for %s: %w", name, err)
+			}
+			secret = secret.DeepCopy()
+			secret.Data["connection_string"] = []byte(connStr)
+			if _, err := m.client.CoreV1().Secrets(m.namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+				return "", fmt.Errorf("update secret %s with connection_string: %w", name, err)
+			}
+			log.Printf("k8s-secrets: added connection_string to existing secret %s", name)
 		}
 		return string(pw), nil
 	}
@@ -50,6 +78,15 @@ func (m *k8sSecretsManager) reconcilePassword(ctx context.Context, serverName st
 		return "", fmt.Errorf("generate password: %w", err)
 	}
 
+	data := map[string][]byte{"password": []byte(password)}
+	if db.RequiresConnectString {
+		connStr, err := buildConnectString(rootConnStr, db, password)
+		if err != nil {
+			return "", fmt.Errorf("build connection string for %s: %w", name, err)
+		}
+		data["connection_string"] = []byte(connStr)
+	}
+
 	newSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -57,7 +94,7 @@ func (m *k8sSecretsManager) reconcilePassword(ctx context.Context, serverName st
 			Labels:    map[string]string{k8sManagedByLabel: "homelab-db-provisioner"},
 		},
 		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{"password": []byte(password)},
+		Data: data,
 	}
 	if _, err := m.client.CoreV1().Secrets(m.namespace).Create(ctx, newSecret, metav1.CreateOptions{}); err != nil {
 		return "", fmt.Errorf("create secret %s: %w", name, err)
@@ -66,11 +103,11 @@ func (m *k8sSecretsManager) reconcilePassword(ctx context.Context, serverName st
 	return password, nil
 }
 
-func applyK8sPassword(ctx context.Context, serverName string, db DatabaseConfig) (DatabaseConfig, error) {
+func applyK8sPassword(ctx context.Context, serverName, rootConnStr string, db DatabaseConfig) (DatabaseConfig, error) {
 	if secretsManager == nil {
 		return db, nil
 	}
-	password, err := secretsManager.reconcilePassword(ctx, serverName, db)
+	password, err := secretsManager.reconcilePassword(ctx, serverName, rootConnStr, db)
 	if err != nil {
 		return db, err
 	}
@@ -78,17 +115,29 @@ func applyK8sPassword(ctx context.Context, serverName string, db DatabaseConfig)
 	return db, nil
 }
 
-func (m *k8sSecretsManager) rotateSecret(ctx context.Context, serverName, database string) (string, error) {
-	name := secretNameFor(serverName, database)
+func (m *k8sSecretsManager) rotateSecret(ctx context.Context, serverName, rootConnStr string, db DatabaseConfig) (string, error) {
+	name := secretNameFor(serverName, db.Database)
 	password, err := generatePassword()
 	if err != nil {
 		return "", fmt.Errorf("generate password: %w", err)
+	}
+
+	var connStr string
+	if db.RequiresConnectString {
+		connStr, err = buildConnectString(rootConnStr, db, password)
+		if err != nil {
+			return "", fmt.Errorf("build connection string for %s: %w", name, err)
+		}
 	}
 
 	secret, err := m.client.CoreV1().Secrets(m.namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return "", fmt.Errorf("get secret %s: %w", name, err)
+		}
+		data := map[string][]byte{"password": []byte(password)}
+		if db.RequiresConnectString {
+			data["connection_string"] = []byte(connStr)
 		}
 		newSecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
@@ -97,7 +146,7 @@ func (m *k8sSecretsManager) rotateSecret(ctx context.Context, serverName, databa
 				Labels:    map[string]string{k8sManagedByLabel: "homelab-db-provisioner"},
 			},
 			Type: corev1.SecretTypeOpaque,
-			Data: map[string][]byte{"password": []byte(password)},
+			Data: data,
 		}
 		if _, err := m.client.CoreV1().Secrets(m.namespace).Create(ctx, newSecret, metav1.CreateOptions{}); err != nil {
 			return "", fmt.Errorf("create secret %s: %w", name, err)
@@ -112,6 +161,10 @@ func (m *k8sSecretsManager) rotateSecret(ctx context.Context, serverName, databa
 	}
 	secret.Data["password"] = []byte(password)
 	delete(secret.StringData, "password")
+	if db.RequiresConnectString {
+		secret.Data["connection_string"] = []byte(connStr)
+		delete(secret.StringData, "connection_string")
+	}
 	if _, err := m.client.CoreV1().Secrets(m.namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
 		return "", fmt.Errorf("update secret %s: %w", name, err)
 	}

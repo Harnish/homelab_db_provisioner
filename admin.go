@@ -69,6 +69,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
         <td>
           {{if $.K8sEnabled}}
             <code>{{secretName $server.Name $db.Database}}</code>
+            {{if $db.RequiresConnectString}}<br><small>+ connection_string</small>{{end}}
             <form method="POST" action="/rotate-secret" style="display:inline;">
               <input type="hidden" name="server_index" value="{{$si}}">
               <input type="hidden" name="db_index" value="{{$di}}">
@@ -148,6 +149,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
       <label>Username: <input type="text" name="user" required></label>
       <label>Password: <input type="password" name="password" required></label>
       <label>Permissions (comma-separated, blank for ALL): <input type="text" name="permissions"></label>
+      <label><input type="checkbox" name="requires_connect_string"> Store full connection_string in Kubernetes secret{{if not .K8sEnabled}} (requires USE_KUBERNETES_SECRETS){{end}}</label>
       <label><input type="checkbox" name="backup_enabled"> Enable backups</label>
       <label>Backup schedule:
         <select name="backup_schedule">
@@ -526,7 +528,7 @@ func handleRotateSecret(configPath string) http.HandlerFunc {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		if _, err := secretsManager.rotateSecret(ctx, serverName, dbName); err != nil {
+		if _, err := secretsManager.rotateSecret(ctx, serverName, cfg.Servers[si].RootConnectionString, cfg.Servers[si].Databases[di]); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to rotate secret: "+err.Error()), http.StatusSeeOther)
 			return
 		}
@@ -606,10 +608,11 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 		}
 
 		newDB := DatabaseConfig{
-			Database:    database,
-			User:        user,
-			Password:    r.FormValue("password"),
-			Permissions: permissions,
+			Database:              database,
+			User:                  user,
+			Password:              r.FormValue("password"),
+			Permissions:           permissions,
+			RequiresConnectString: r.FormValue("requires_connect_string") == "on",
 		}
 		if backup := parseBackupFields(r); backup.Enabled || backup.RestoreOnCreate || backup.KeepCount != 0 {
 			newDB.Backup = &backup

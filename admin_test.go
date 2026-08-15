@@ -276,6 +276,79 @@ func TestAddDatabase_Success(t *testing.T) {
 	}
 }
 
+func TestAddDatabase_RequiresConnectStringChecked(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index":            {"0"},
+		"database":                {"newdb"},
+		"user":                    {"newuser"},
+		"password":                {"newpass"},
+		"requires_connect_string": {"on"},
+	}
+	req := httptest.NewRequest("POST", "/add-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	added := cfg.Servers[0].Databases[len(cfg.Servers[0].Databases)-1]
+	if !added.RequiresConnectString {
+		t.Errorf("expected RequiresConnectString true, got false")
+	}
+}
+
+func TestAddDatabase_RequiresConnectStringDefaultsFalse(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index": {"0"},
+		"database":     {"newdb"},
+		"user":         {"newuser"},
+		"password":     {"newpass"},
+	}
+	req := httptest.NewRequest("POST", "/add-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	added := cfg.Servers[0].Databases[len(cfg.Servers[0].Databases)-1]
+	if added.RequiresConnectString {
+		t.Errorf("expected RequiresConnectString false when checkbox omitted, got true")
+	}
+}
+
 func TestAddDatabase_EmptyPermissions(t *testing.T) {
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD", "secret")
@@ -343,7 +416,7 @@ func TestAddServer_Success(t *testing.T) {
 	h := newAdminHandler(path)
 
 	form := url.Values{
-		"name":                    {"New Server"},
+		"name":                   {"New Server"},
 		"root_connection_string": {"postgres://root:pass@newhost/postgres"},
 	}
 	req := httptest.NewRequest("POST", "/add-server", strings.NewReader(form.Encode()))
@@ -386,7 +459,7 @@ func TestAddServer_DryRunChecked(t *testing.T) {
 	h := newAdminHandler(path)
 
 	form := url.Values{
-		"name":                    {"New Server"},
+		"name":                   {"New Server"},
 		"root_connection_string": {"postgres://root:pass@newhost/postgres"},
 		"dry_run":                {"on"},
 	}
@@ -419,7 +492,7 @@ func TestAddServer_MissingName(t *testing.T) {
 	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
 
 	form := url.Values{
-		"name":                    {""},
+		"name":                   {""},
 		"root_connection_string": {"postgres://root:pass@newhost/postgres"},
 	}
 	req := httptest.NewRequest("POST", "/add-server", strings.NewReader(form.Encode()))
@@ -439,7 +512,7 @@ func TestAddServer_MissingConnectionString(t *testing.T) {
 	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
 
 	form := url.Values{
-		"name":                    {"New Server"},
+		"name":                   {"New Server"},
 		"root_connection_string": {""},
 	}
 	req := httptest.NewRequest("POST", "/add-server", strings.NewReader(form.Encode()))
@@ -490,6 +563,53 @@ func TestIndex_ShowsK8sSecretColumnWhenEnabled(t *testing.T) {
 	}
 	if strings.Contains(body, `action="/update-password"`) {
 		t.Error("did not expect manual password form when k8s secrets enabled")
+	}
+}
+
+func TestIndex_ShowsConnectionStringMarkerWhenRequired(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	configJSON := `{
+	  "servers": [
+	    {
+	      "name": "Test Server",
+	      "root_connection_string": "postgres://root:pass@localhost/postgres",
+	      "databases": [
+	        {"database": "mydb", "user": "myuser", "password": "mypass", "requires_connect_string": true}
+	      ]
+	    }
+	  ]
+	}`
+	h := newAdminHandler(makeTestConfig(t, configJSON))
+
+	secretsManager = &k8sSecretsManager{client: fake.NewSimpleClientset(), namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if !strings.Contains(w.Body.String(), "+ connection_string") {
+		t.Error("expected connection_string marker in body when RequiresConnectString is true")
+	}
+}
+
+func TestIndex_HidesConnectionStringMarkerByDefault(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	secretsManager = &k8sSecretsManager{client: fake.NewSimpleClientset(), namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if strings.Contains(w.Body.String(), "+ connection_string") {
+		t.Error("did not expect connection_string marker when RequiresConnectString is false")
 	}
 }
 
