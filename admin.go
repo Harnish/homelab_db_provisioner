@@ -60,12 +60,13 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
   {{range $si, $server := .Servers}}
     <h3>{{$server.Name}}</h3>
     <table>
-      <tr><th>Database</th><th>User</th><th>Permissions</th><th>{{if $.K8sEnabled}}Kubernetes Secret{{else}}Change Password{{end}}</th><th>Backup</th></tr>
+      <tr><th>Database</th><th>User</th><th>Permissions</th><th>Extensions</th><th>{{if $.K8sEnabled}}Kubernetes Secret{{else}}Change Password{{end}}</th><th>Backup</th></tr>
       {{range $di, $db := $server.Databases}}
       <tr>
         <td>{{$db.Database}}</td>
         <td>{{$db.User}}</td>
         <td>{{if $db.Permissions}}{{join $db.Permissions ", "}}{{else}}ALL{{end}}</td>
+        <td>{{if $db.Extensions}}{{join $db.Extensions ", "}}{{else}}—{{end}}</td>
         <td>
           {{if $.K8sEnabled}}
             <code>{{secretName $server.Name $db.Database}}</code>
