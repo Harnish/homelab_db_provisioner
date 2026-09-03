@@ -185,6 +185,7 @@ func newAdminHandler(configPath string) http.Handler {
 	mux.HandleFunc("/update-backup", handleUpdateBackup(configPath))
 	mux.HandleFunc("/add-database", handleAddDatabase(configPath))
 	mux.HandleFunc("/add-server", handleAddServer(configPath))
+	mux.HandleFunc("/migrate-database", handleMigrateDatabase(configPath))
 	mux.HandleFunc("GET /api/servers", handleAPIListServers(configPath))
 	mux.HandleFunc("GET /api/servers/{si}", handleAPIGetServer(configPath))
 	mux.HandleFunc("POST /api/servers", handleAPICreateServer(configPath))
@@ -329,6 +330,81 @@ func handleUpdatePassword(configPath string) http.HandlerFunc {
 			return
 		}
 		http.Redirect(w, r, "/?msg="+url.QueryEscape("Password updated"), http.StatusSeeOther)
+	}
+}
+
+func handleMigrateDatabase(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		si, err := strconv.Atoi(r.FormValue("server_index"))
+		if err != nil {
+			http.Error(w, "Invalid server_index", http.StatusBadRequest)
+			return
+		}
+		di, err := strconv.Atoi(r.FormValue("db_index"))
+		if err != nil {
+			http.Error(w, "Invalid db_index", http.StatusBadRequest)
+			return
+		}
+		targetServer := strings.TrimSpace(r.FormValue("target_server"))
+		confirmDrop := r.FormValue("confirm_drop") == "on"
+
+		configMu.Lock()
+		defer configMu.Unlock()
+
+		fileData, err := os.ReadFile(configPath)
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to read config"), http.StatusSeeOther)
+			return
+		}
+		var cfg Config
+		if err := json.Unmarshal(fileData, &cfg); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to parse config"), http.StatusSeeOther)
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			http.Error(w, "server_index out of range", http.StatusBadRequest)
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			http.Error(w, "db_index out of range", http.StatusBadRequest)
+			return
+		}
+
+		if targetServer == "" {
+			cfg.Servers[si].Databases[di].Migrate = nil
+		} else {
+			if _, err := resolveTargetServer(&cfg, targetServer, cfg.Servers[si].Name); err != nil {
+				http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: "+err.Error()), http.StatusSeeOther)
+				return
+			}
+			cfg.Servers[si].Databases[di].Migrate = &MigrateConfig{
+				TargetServer: targetServer,
+				ConfirmDrop:  confirmDrop,
+			}
+		}
+
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
+			return
+		}
+		if err := os.WriteFile(configPath, out, 0600); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to write config"), http.StatusSeeOther)
+			return
+		}
+		msg := "Migration scheduled"
+		if targetServer == "" {
+			msg = "Migration cleared"
+		}
+		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 	}
 }
 

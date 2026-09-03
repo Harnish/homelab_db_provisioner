@@ -250,6 +250,104 @@ func TestUpdatePassword_InvalidDBIndex(t *testing.T) {
 	}
 }
 
+func TestMigrateDatabase_SetsBlock(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	cfg := `{"servers":[
+		{"name":"old-pg","root_connection_string":"postgres://r:p@old/postgres","databases":[{"database":"app","user":"app","password":"pw"}]},
+		{"name":"new-pg","root_connection_string":"postgres://r:p@new/postgres","databases":[]}
+	]}`
+	path := makeTestConfig(t, cfg)
+	h := newAdminHandler(path)
+
+	form := url.Values{
+		"server_index":  {"0"},
+		"db_index":      {"0"},
+		"target_server": {"new-pg"},
+		"confirm_drop":  {"on"},
+	}
+	req := httptest.NewRequest("POST", "/migrate-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+	var out Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &out)
+	m := out.Servers[0].Databases[0].Migrate
+	if m == nil || m.TargetServer != "new-pg" || !m.ConfirmDrop {
+		t.Fatalf("unexpected migrate block: %+v", m)
+	}
+}
+
+func TestMigrateDatabase_EmptyTargetClears(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	cfg := `{"servers":[{"name":"old-pg","root_connection_string":"postgres://r:p@old/postgres","databases":[{"database":"app","user":"app","password":"pw","migrate":{"target_server":"new-pg","error":"boom"}}]}]}`
+	path := makeTestConfig(t, cfg)
+	h := newAdminHandler(path)
+
+	form := url.Values{"server_index": {"0"}, "db_index": {"0"}, "target_server": {""}}
+	req := httptest.NewRequest("POST", "/migrate-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var out Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &out)
+	if out.Servers[0].Databases[0].Migrate != nil {
+		t.Fatalf("expected migrate cleared, got %+v", out.Servers[0].Databases[0].Migrate)
+	}
+}
+
+func TestMigrateDatabase_RejectsSameServer(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	cfg := `{"servers":[{"name":"old-pg","root_connection_string":"postgres://r:p@old/postgres","databases":[{"database":"app","user":"app","password":"pw"}]}]}`
+	path := makeTestConfig(t, cfg)
+	h := newAdminHandler(path)
+
+	form := url.Values{"server_index": {"0"}, "db_index": {"0"}, "target_server": {"old-pg"}}
+	req := httptest.NewRequest("POST", "/migrate-database", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d", w.Code)
+	}
+	if !strings.Contains(w.Header().Get("Location"), "Error") {
+		t.Fatalf("expected error flash, got %q", w.Header().Get("Location"))
+	}
+	var out Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &out)
+	if out.Servers[0].Databases[0].Migrate != nil {
+		t.Fatal("migrate block should not have been written")
+	}
+}
+
+func TestMigrateDatabase_WrongMethod(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+	req := httptest.NewRequest("GET", "/migrate-database", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
 func TestAddDatabase_Success(t *testing.T) {
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD", "secret")
