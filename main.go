@@ -195,7 +195,9 @@ func loadConfig() (*Config, error) {
 			return nil, fmt.Errorf("server %d: root connection string is required", i)
 		}
 		if len(server.Databases) == 0 {
-			return nil, fmt.Errorf("server %d (%s): at least one database configuration is required", i, server.Name)
+			// A server with no databases is valid — e.g. a freshly added
+			// migration target that databases will be migrated onto.
+			log.Printf("server %d (%s): no databases configured", i, server.Name)
 		}
 	}
 

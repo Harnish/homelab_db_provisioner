@@ -11,6 +11,9 @@ go test ./...
 # Run a single test
 go test -run TestUpdatePassword_Success ./...
 
+# Run integration tests (needs MIGRATE_SOURCE_CONN / MIGRATE_TARGET_CONN)
+go test -tags integration ./...
+
 # Build the binary
 go build -o provisioner .
 
@@ -23,7 +26,7 @@ WATCH_MODE=true CONFIG_PATH=./config.json go run .
 # Run with admin UI
 ADMIN_SITE=true ADMIN_USER=admin ADMIN_PASSWORD=secret WATCH_MODE=true CONFIG_PATH=./config.json go run .
 
-# Docker Compose (starts postgres + mariadb + provisioner using config-multi.json)
+# Docker Compose (starts postgres + postgres-target + mariadb + provisioner using config-multi.json)
 docker-compose up --build
 ```
 
@@ -75,6 +78,26 @@ When `Config.S3` is set (top-level `s3` block: `bucket`, `region`, optional `end
 ### Dry-run mode
 
 Each `DatabaseServer` has an optional `dry_run: true` field. When set, all SQL statements are logged with `[DRY RUN]` prefix but not executed.
+
+### Database migration (PostgreSQL only)
+
+`migrate.go` owns database migration — moving a PostgreSQL database from one `DatabaseServer` to another, primarily for major-version upgrades.
+
+A `migrate` block on a database entry (`target_server`, optional `confirm_drop`) is picked up by a dedicated pass at the top of `processConfig`, which runs *before* normal provisioning so the backup fallback works even when the source server is unreachable. `runMigration`:
+
+1. Resolves `target_server` (must exist in `config.Servers` and be PostgreSQL; must differ from source).
+2. Refuses if the target database already exists; otherwise `provisionPostgreSQL` creates the role/database/extensions/permissions on the target.
+3. Streams `pg_dump` (source) → `psql` (target). If `pg_dump` cannot reach the source, falls back to `findNewestBackup` + `restorePostgreSQL`.
+4. Verifies by comparing per-base-table row counts source vs target (`verifyMigration`). The backup-fallback path only checks the target is non-empty (`verifyTargetNonEmpty`).
+5. On success sets `migrate.completed` + `completed_at`. If `confirm_drop`, runs `DROP DATABASE ... WITH (FORCE)` on the source (the role is left intact).
+
+Failures are recorded in `migrate.error` and are never fatal. A completed entry becomes a tombstone: the `processConfig` provisioning loop, `runBackups`, and the Mongo backup scheduler all skip it, and `allDatabasesMigrated` short-circuits a server whose entries are all tombstones (no connection attempt). The operator then removes the entry or relocates it to the target server. The admin UI writes/clears the `migrate` block via `POST /migrate-database`.
+
+Verification limitation: only base-table row-count parity is checked; sequences, views, functions, and grants are restored by `pg_dump` but not independently verified.
+
+Servers with an empty `databases` list are now valid (a migration target that databases will be moved onto) — `loadConfig` logs a notice instead of erroring.
+
+The end-to-end path is covered by `migrate_integration_test.go` (`//go:build integration`), which needs two reachable Postgres instances via `MIGRATE_SOURCE_CONN` / `MIGRATE_TARGET_CONN`. `docker-compose.yaml` provides a `postgres-target` service (port 5433) for this.
 
 ## Key environment variables
 

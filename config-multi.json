@@ -19,6 +19,12 @@
       ]
     },
     {
+      "name": "postgres-target",
+      "root_connection_string": "postgres://postgres:rootpassword@postgres-target:5432/postgres?sslmode=disable",
+      "dry_run": false,
+      "databases": []
+    },
+    {
       "name": "Production MariaDB",
       "root_connection_string": "mariadb://root:rootpassword@mariadb:3306/",
       "dry_run": false,

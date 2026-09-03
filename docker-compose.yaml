@@ -17,6 +17,22 @@ services:
       timeout: 5s
       retries: 5
 
+  postgres-target:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: rootpassword
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_target_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   mariadb:
     image: mariadb:11
     environment:
@@ -36,6 +52,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-target:
+        condition: service_healthy
       mariadb:
         condition: service_healthy
     volumes:
@@ -46,4 +64,5 @@ services:
 
 volumes:
   postgres_data:
+  postgres_target_data:
   mariadb_data:
