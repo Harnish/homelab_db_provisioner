@@ -48,27 +48,42 @@ type MigrateConfig struct {
 
 ## Execution flow
 
-In `processConfig`, PostgreSQL branch, evaluated per database entry **before**
-the normal provisioning call for that entry:
+Migration runs as its **own pass** at the top of `processConfig`, after the
+backup-summary block and before the "Process each server" provisioning loop.
+This is deliberate: the fallback ("source unreachable → restore newest backup")
+must work even when the source root connection is dead, but the main
+provisioning loop `continue`s past a server whose root connection fails — so the
+migration hook cannot live inside it.
 
-1. `Migrate != nil && Migrate.Completed` → this entry is a tombstone. Skip
-   provisioning and skip backups for it. `continue`. (The live database now
-   lives on the target server; the operator removes or relocates the config
-   entry manually.)
+Migration pass — for each `config.Servers[si]` whose `RootConnectionString` is
+PostgreSQL, for each `Databases[di]`:
 
-2. `Migrate != nil && !Migrate.Completed && !server.DryRun` → call
-   `runMigration(config, serverIdx, server, i, dbConfig, getConfigPath())`, then
-   `continue` (do not also run normal provisioning on the source this pass).
+1. `Migrate == nil || Migrate.Completed` → skip (nothing to do this pass).
 
-3. `Migrate != nil && server.DryRun` → log `[DRY RUN] would migrate <db> from
-   <source> to <target> (confirm_drop=<bool>)` and `continue`. No connections
-   opened, no config write.
+2. `server.DryRun` → log `[DRY RUN] would migrate <server>/<db> to <target>
+   (confirm_drop=<bool>)` and skip. No connections opened, no config write.
+
+3. Otherwise → `runMigration(config, si, server, di, dbConfig, getConfigPath())`.
+
+Then, in the existing provisioning loop, each database entry is checked:
+
+- `Migrate != nil && Migrate.Completed` → tombstone. Log and `continue` — skip
+  provisioning **and** skip backups for this entry. (The live database now lives
+  on the target server; the operator removes or relocates the config entry
+  manually.)
+- `Migrate != nil && !Migrate.Completed` (pending or failed) → fall through to
+  **normal provisioning** as usual. Keeping the source database healthy while a
+  migration is pending or being debugged is the safe default; the next pass
+  retries the migration.
+
+Backups: `runBackups` / the scheduler must apply the same tombstone skip —
+`Migrate != nil && Migrate.Completed` → do not back up that entry.
 
 ### `runMigration(config *Config, serverIdx int, source DatabaseServer, dbIdx int, db DatabaseConfig, configPath string)`
 
-All failure paths: set `Error`, leave `Completed=false`, persist via the
-"Config persistence" write, log, and return `nil` (never fatal — a failed
-migration must not stop the rest of `processConfig`).
+Signature returns nothing. All failure paths: set `Error`, leave
+`Completed=false`, persist via the "Config persistence" write, log, and return
+(never fatal — a failed migration must not stop the rest of `processConfig`).
 
 1. **Resolve target.** Find `config.Servers[i].Name == db.Migrate.TargetServer`.
    Not found → error `"target server %q not found"`. `detectDBType` of its
@@ -93,25 +108,33 @@ migration must not stop the rest of `processConfig`).
      non-zero `psql` exit is **not** by itself a migration failure — step 4 is
      the correctness gate. A non-zero `pg_dump` exit **is** a failure unless it
      is a connection error (see fallback).
-   - Fallback (source unreachable): if `pg_dump` fails to connect to the source,
-     call `findNewestBackup(config, configPath, source.Name, db.Database,
+   - Fallback (source unreachable): if `pg_dump` exits non-zero **and** its
+     stderr looks like a connection error (`isConnectionError`), call
+     `findNewestBackup(config, configPath, source.Name, db.Database,
      PostgreSQL)`. If it returns a file, `restorePostgreSQL(targetConnStr,
-     db.Database, backupFile)`. If it returns `""` → error `"source unreachable
-     and no backup found"`.
-   - Connection-string rewriting (set URL path to `/<database>`) mirrors
-     `backupPostgreSQL` / `restorePostgreSQL`.
+     db.Database, backupFile)` and set `fromBackup = true`. If it returns `""` →
+     error `"source unreachable and no backup found"`.
+   - Connection-string rewriting (set URL path to `/<database>`) uses the shared
+     `connStrWithDB` helper (extracted from `backupPostgreSQL` /
+     `restorePostgreSQL` as part of this work).
 
-4. **Verify.** `verifyMigration(sourceConnStr, targetConnStr, db.Database)` — see
-   "Verification". Any error → migration failure (target database is left in
-   place for inspection; no drop).
+4. **Verify.**
+   - Normal path (`!fromBackup`): `verifyMigration(sourceConnStr, targetConnStr,
+     db.Database)` — see "Verification". Any error → migration failure (target
+     database is left in place for inspection; no drop).
+   - Backup fallback (`fromBackup`): the source is unreachable, so a
+     source-vs-target comparison is impossible. Run `verifyTargetNonEmpty(
+     targetConnStr, db.Database)` (target has ≥1 base table) and log a warning
+     that full verification was skipped. Error → migration failure.
 
-5. **Success.** `db.Migrate.Completed = true`,
-   `db.Migrate.CompletedAt = time.Now().UTC().Format(time.RFC3339)`,
-   `db.Migrate.Error = ""`. If `db.Migrate.ConfirmDrop`: run
-   `DROP DATABASE <quoted db>` on the **source** root connection. The source
-   role is left untouched (it may own other databases / be shared). A failed
-   drop sets `Error` to the drop error but keeps `Completed = true` (the
-   migration itself succeeded).
+5. **Success.** `Completed = true`,
+   `CompletedAt = time.Now().UTC().Format(time.RFC3339)`, `Error = ""`.
+   If `ConfirmDrop`: `dropPostgreSQLDatabase(source.RootConnectionString,
+   db.Database)` runs `DROP DATABASE <quoted db> WITH (FORCE)` on the source.
+   The source role is left untouched (it may own other databases / be shared).
+   A failed drop sets `Error` to the drop error but keeps `Completed = true`
+   (the migration itself succeeded). `ConfirmDrop` with `fromBackup` will
+   almost certainly fail the drop (source is down) — that is fine and expected.
 
 6. Persist the final `MigrateConfig` (see "Config persistence").
 
@@ -136,6 +159,15 @@ migration must not stop the rest of `processConfig`).
    error naming the table and both counts. Stop at the first mismatch.
 
 3. All match → `nil`.
+
+The set-diff and count-diff logic is factored into a pure helper
+`compareTableCounts(source, target map[string]int64) error` (key =
+`"schema.table"`) so it is unit-testable without a database; `verifyMigration`
+only does the querying.
+
+`verifyTargetNonEmpty(targetConnStr, database string) error` — the fallback
+check: runs the same base-table query against the target only, errors if the
+count is zero.
 
 Known limitation (documented in CLAUDE.md): sequences, views, functions, and
 grants are restored by `pg_dump` but not independently verified; row-count
@@ -196,10 +228,9 @@ control.
   button (clears `Migrate`) — operator re-adds the migrate block after fixing
   the cause.
 
-`adminTemplateData` needs the list of PostgreSQL server names available for the
-`<select>` (compute in `handleIndex`, or derive in the template from `Servers`
-with a helper). Deriving in `handleIndex` and adding a field to
-`adminTemplateData` is preferred for testability.
+`adminTemplateData` gains `PGServerNames []string` — the names of all PostgreSQL
+servers, computed in `handleIndex`. The template filters out the current server
+per-row when rendering the `<select>` (compare against `$server.Name`).
 
 No JSON API endpoint in this iteration (the existing `/api` surface can add
 `migrate` to the database PATCH body later if needed — out of scope here).
@@ -259,13 +290,22 @@ base table only).
 
 ## Files touched
 
-- `main.go` — `MigrateConfig` type, `DatabaseConfig.Migrate` field, migration
-  hook + deferred status-write in `processConfig`.
-- `migrate.go` — **new**: `runMigration`, `resolveTargetServer`,
-  `verifyMigration`, dump/restore streaming helper, source `DROP DATABASE`.
+- `main.go` — `MigrateConfig` type, `DatabaseConfig.Migrate` field, the
+  migration pass at the top of `processConfig`, and the tombstone skip in the
+  provisioning loop.
+- `backup.go` — extract `connStrWithDB(rootConnStr, database string) (string,
+  error)`; refactor `backupPostgreSQL` and `restorePostgreSQL` to use it; add
+  the tombstone skip to `runBackups`.
+- `migrate.go` — **new**: `MigrateConfig` logic — `runMigration`,
+  `resolveTargetServer`, `migratePostgreSQLData` (streaming `pg_dump | psql`),
+  `pgDumpError` + `isConnectionError`, `verifyMigration`, `compareTableCounts`,
+  `verifyTargetNonEmpty`, `dropPostgreSQLDatabase`, `persistMigrate`.
 - `admin.go` — `handleMigrateDatabase`, route registration, template migration
-  control, `adminTemplateData` PG-server-names field, `handleIndex` populates it.
-- `migrate_test.go`, `admin_test.go` — tests per above.
+  control, `adminTemplateData.PGServerNames`, `handleIndex` populates it.
+- `migrate_test.go` — **new**: unit tests (see Testing).
+- `admin_test.go` — `handleMigrateDatabase` tests, template-render tests.
+- `main_test.go` — tombstone-skip test for `processConfig`.
 - `CLAUDE.md` — Database migration subsection.
-- `docker-compose.yml` / `config-multi.json` — optionally a second postgres
-  target for integration testing (can be deferred).
+- `docker-compose.yml`, `config-multi.json` — second postgres service +
+  integration test config (integration test itself is `//go:build integration`
+  tagged and can land in the same task or be deferred — flag in the plan).
