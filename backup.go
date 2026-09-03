@@ -59,6 +59,9 @@ func runBackups(config *Config, configPath string, t time.Time) {
 		}
 
 		for _, db := range server.Databases {
+			if db.Migrate != nil && db.Migrate.Completed {
+				continue
+			}
 			if db.Backup == nil || !db.Backup.Enabled {
 				continue
 			}

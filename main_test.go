@@ -82,6 +82,25 @@ func TestConfig_S3ConfigAbsent(t *testing.T) {
 	}
 }
 
+func TestProcessConfig_CompletedMigrationSkipsProvisioning(t *testing.T) {
+	cfg := &Config{Servers: []DatabaseServer{{
+		Name:                 "old-pg",
+		RootConnectionString: "postgres://r:p@127.0.0.1:1/postgres",
+		Databases: []DatabaseConfig{{
+			Database: "app", User: "app", Password: "pw",
+			Migrate: &MigrateConfig{TargetServer: "new-pg", Completed: true, CompletedAt: "2026-09-03T00:00:00Z"},
+		}},
+	}}}
+
+	if err := processConfig(cfg); err != nil {
+		t.Fatalf("processConfig returned error: %v", err)
+	}
+	m := cfg.Servers[0].Databases[0].Migrate
+	if m == nil || !m.Completed || m.Error != "" {
+		t.Fatalf("completed migration should be untouched, got %+v", m)
+	}
+}
+
 func TestConfig_MigrateConfigRoundTrip(t *testing.T) {
 	raw := `{
 		"servers": [

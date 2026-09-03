@@ -233,6 +233,25 @@ func processConfig(config *Config) error {
 	}
 	log.Println("========================================")
 
+	// Migration pass — runs before normal provisioning so the backup fallback
+	// works even when the source server's root connection is dead.
+	for si, server := range config.Servers {
+		if detectDBType(server.RootConnectionString) != PostgreSQL {
+			continue
+		}
+		for di, dbConfig := range server.Databases {
+			if dbConfig.Migrate == nil || dbConfig.Migrate.Completed {
+				continue
+			}
+			if server.DryRun {
+				log.Printf("[DRY RUN] would migrate %s/%s to %s (confirm_drop=%v)",
+					server.Name, dbConfig.Database, dbConfig.Migrate.TargetServer, dbConfig.Migrate.ConfirmDrop)
+				continue
+			}
+			runMigration(config, si, server, di, dbConfig, getConfigPath())
+		}
+	}
+
 	// Process each server
 	for serverIdx, server := range config.Servers {
 		serverName := server.Name
@@ -246,6 +265,13 @@ func processConfig(config *Config) error {
 			log.Printf("MODE: DRY RUN (no changes will be applied)")
 		}
 		log.Printf("========================================")
+
+		// Skip servers whose every database has already been migrated away —
+		// no point opening a connection (and eating the retry timeout).
+		if allDatabasesMigrated(server) {
+			log.Printf("All databases on %s have been migrated away, skipping server", serverName)
+			continue
+		}
 
 		// Detect database type
 		dbType := detectDBType(server.RootConnectionString)
@@ -287,6 +313,12 @@ func processConfig(config *Config) error {
 			// Process each database configuration for this server
 			for i, dbConfig := range server.Databases {
 				log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
+
+				if dbConfig.Migrate != nil && dbConfig.Migrate.Completed {
+					log.Printf("migrate: %s/%s migrated to %s, skipping provisioning and backups",
+						serverName, dbConfig.Database, dbConfig.Migrate.TargetServer)
+					continue
+				}
 
 				if server.DryRun {
 					log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)
@@ -342,6 +374,12 @@ func processConfig(config *Config) error {
 		// Process each database configuration for this server
 		for i, dbConfig := range server.Databases {
 			log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
+
+			if dbConfig.Migrate != nil && dbConfig.Migrate.Completed {
+				log.Printf("migrate: %s/%s migrated to %s, skipping provisioning and backups",
+					serverName, dbConfig.Database, dbConfig.Migrate.TargetServer)
+				continue
+			}
 
 			if server.DryRun {
 				log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)

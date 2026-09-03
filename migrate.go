@@ -14,6 +14,20 @@ import (
 	"time"
 )
 
+// allDatabasesMigrated reports whether every database entry on the server has a
+// completed migration (so the server no longer needs provisioning or backups).
+func allDatabasesMigrated(server DatabaseServer) bool {
+	if len(server.Databases) == 0 {
+		return false
+	}
+	for _, db := range server.Databases {
+		if db.Migrate == nil || !db.Migrate.Completed {
+			return false
+		}
+	}
+	return true
+}
+
 func resolveTargetServer(config *Config, targetName, sourceName string) (DatabaseServer, error) {
 	if targetName == sourceName {
 		return DatabaseServer{}, fmt.Errorf("target server must differ from source")

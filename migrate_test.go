@@ -86,6 +86,25 @@ func testConfig2PG() *Config {
 	}}
 }
 
+func TestAllDatabasesMigrated(t *testing.T) {
+	done := &MigrateConfig{TargetServer: "x", Completed: true}
+	cases := []struct {
+		name string
+		srv  DatabaseServer
+		want bool
+	}{
+		{"empty", DatabaseServer{}, false},
+		{"one pending", DatabaseServer{Databases: []DatabaseConfig{{Migrate: &MigrateConfig{TargetServer: "x"}}}}, false},
+		{"mixed", DatabaseServer{Databases: []DatabaseConfig{{Migrate: done}, {}}}, false},
+		{"all done", DatabaseServer{Databases: []DatabaseConfig{{Migrate: done}, {Migrate: done}}}, true},
+	}
+	for _, c := range cases {
+		if got := allDatabasesMigrated(c.srv); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestResolveTargetServer_OK(t *testing.T) {
 	s, err := resolveTargetServer(testConfig2PG(), "new-pg", "old-pg")
 	if err != nil {
