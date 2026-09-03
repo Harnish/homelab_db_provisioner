@@ -1,11 +1,82 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func writeTempConfig(t *testing.T, cfg Config) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config.json")
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, out, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func readConfig(t *testing.T, path string) Config {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestPersistMigrate_WritesBlock(t *testing.T) {
+	cfg := Config{Servers: []DatabaseServer{{
+		Name: "old-pg", RootConnectionString: "postgres://r:p@old/postgres",
+		Databases: []DatabaseConfig{{Database: "app", User: "app", Password: "pw"}},
+	}}}
+	path := writeTempConfig(t, cfg)
+
+	persistMigrate(path, 0, 0, MigrateConfig{TargetServer: "new-pg", Error: "boom"})
+
+	got := readConfig(t, path).Servers[0].Databases[0].Migrate
+	if got == nil || got.TargetServer != "new-pg" || got.Error != "boom" {
+		t.Fatalf("unexpected: %+v", got)
+	}
+}
+
+func TestPersistMigrate_OutOfRangeIsNoop(t *testing.T) {
+	cfg := Config{Servers: []DatabaseServer{{Name: "s", Databases: []DatabaseConfig{{Database: "d"}}}}}
+	path := writeTempConfig(t, cfg)
+	persistMigrate(path, 5, 5, MigrateConfig{TargetServer: "x"}) // must not panic
+	if readConfig(t, path).Servers[0].Databases[0].Migrate != nil {
+		t.Error("expected no change")
+	}
+}
+
+func TestRunMigration_UnknownTargetRecordsError(t *testing.T) {
+	cfg := Config{Servers: []DatabaseServer{{
+		Name: "old-pg", RootConnectionString: "postgres://r:p@old/postgres",
+		Databases: []DatabaseConfig{{
+			Database: "app", User: "app", Password: "pw",
+			Migrate: &MigrateConfig{TargetServer: "ghost"},
+		}},
+	}}}
+	path := writeTempConfig(t, cfg)
+
+	runMigration(&cfg, 0, cfg.Servers[0], 0, cfg.Servers[0].Databases[0], path)
+
+	got := readConfig(t, path).Servers[0].Databases[0].Migrate
+	if got == nil || got.Completed || !strings.Contains(got.Error, "not found") {
+		t.Fatalf("expected not-found error recorded, got %+v", got)
+	}
+}
 
 func testConfig2PG() *Config {
 	return &Config{Servers: []DatabaseServer{

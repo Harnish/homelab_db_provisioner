@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 )
 
 func resolveTargetServer(config *Config, targetName, sourceName string) (DatabaseServer, error) {
@@ -24,6 +28,133 @@ func resolveTargetServer(config *Config, targetName, sourceName string) (Databas
 		return s, nil
 	}
 	return DatabaseServer{}, fmt.Errorf("target server %q not found", targetName)
+}
+
+func persistMigrate(configPath string, serverIdx, dbIdx int, m MigrateConfig) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		log.Printf("migrate: persist read %s: %v", configPath, err)
+		return
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		log.Printf("migrate: persist parse: %v", err)
+		return
+	}
+	if serverIdx < 0 || serverIdx >= len(cfg.Servers) {
+		return
+	}
+	if dbIdx < 0 || dbIdx >= len(cfg.Servers[serverIdx].Databases) {
+		return
+	}
+	mc := m
+	cfg.Servers[serverIdx].Databases[dbIdx].Migrate = &mc
+
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		log.Printf("migrate: persist marshal: %v", err)
+		return
+	}
+	if err := os.WriteFile(configPath, out, 0600); err != nil {
+		log.Printf("migrate: persist write: %v", err)
+	}
+}
+
+func runMigration(config *Config, serverIdx int, source DatabaseServer, dbIdx int, db DatabaseConfig, configPath string) {
+	m := *db.Migrate
+	fail := func(format string, args ...interface{}) {
+		m.Completed = false
+		m.Error = fmt.Sprintf(format, args...)
+		log.Printf("migrate: %s/%s: %s", source.Name, db.Database, m.Error)
+		persistMigrate(configPath, serverIdx, dbIdx, m)
+	}
+
+	target, err := resolveTargetServer(config, m.TargetServer, source.Name)
+	if err != nil {
+		fail("%v", err)
+		return
+	}
+	log.Printf("migrate: %s/%s -> %s starting", source.Name, db.Database, target.Name)
+
+	// Prepare target.
+	targetRoot, err := sql.Open("postgres", target.RootConnectionString)
+	if err != nil {
+		fail("open target: %v", err)
+		return
+	}
+	exists, err := checkPostgreSQLDatabaseExists(context.Background(), targetRoot, db.Database)
+	if err != nil {
+		targetRoot.Close()
+		fail("check target database: %v", err)
+		return
+	}
+	if exists {
+		targetRoot.Close()
+		fail("target database %q already exists on %q, refusing to overwrite", db.Database, target.Name)
+		return
+	}
+	if _, err := provisionPostgreSQL(targetRoot, target.RootConnectionString, db, false); err != nil {
+		targetRoot.Close()
+		fail("provision target: %v", err)
+		return
+	}
+	targetRoot.Close()
+
+	// Dump + restore.
+	fromBackup := false
+	if dumpErr := migratePostgreSQLData(source.RootConnectionString, target.RootConnectionString, db.Database); dumpErr != nil {
+		var de *pgDumpError
+		if errors.As(dumpErr, &de) && isConnectionError(de.stderr) {
+			log.Printf("migrate: %s/%s: source unreachable, falling back to newest backup", source.Name, db.Database)
+			backupFile := findNewestBackup(config, configPath, source.Name, db.Database, PostgreSQL)
+			if backupFile == "" {
+				fail("source unreachable and no backup found")
+				return
+			}
+			if err := restorePostgreSQL(target.RootConnectionString, db.Database, backupFile); err != nil {
+				fail("restore from backup %s: %v", backupFile, err)
+				return
+			}
+			fromBackup = true
+		} else {
+			fail("%v", dumpErr)
+			return
+		}
+	}
+
+	// Verify.
+	if fromBackup {
+		if err := verifyTargetNonEmpty(target.RootConnectionString, db.Database); err != nil {
+			fail("verification (backup fallback) failed: %v", err)
+			return
+		}
+		log.Printf("migrate: %s/%s: restored from backup; full source/target verification skipped", source.Name, db.Database)
+	} else {
+		if err := verifyMigration(source.RootConnectionString, target.RootConnectionString, db.Database); err != nil {
+			fail("verification failed: %v", err)
+			return
+		}
+	}
+
+	// Success.
+	m.Completed = true
+	m.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+	m.Error = ""
+
+	if m.ConfirmDrop {
+		if err := dropPostgreSQLDatabase(source.RootConnectionString, db.Database); err != nil {
+			m.Error = fmt.Sprintf("migration succeeded but source drop failed: %v", err)
+			log.Printf("migrate: %s/%s: %s", source.Name, db.Database, m.Error)
+		} else {
+			log.Printf("migrate: %s/%s: dropped source database", source.Name, db.Database)
+		}
+	}
+
+	persistMigrate(configPath, serverIdx, dbIdx, m)
+	log.Printf("migrate: %s/%s -> %s complete", source.Name, db.Database, target.Name)
 }
 
 type pgDumpError struct {
