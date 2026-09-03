@@ -57,19 +57,18 @@ the normal provisioning call for that entry:
    entry manually.)
 
 2. `Migrate != nil && !Migrate.Completed && !server.DryRun` → call
-   `runMigration(config, sourceServer, &dbConfig, configPath)`, then `continue`
-   (do not also run normal provisioning on the source this pass).
+   `runMigration(config, serverIdx, server, i, dbConfig, getConfigPath())`, then
+   `continue` (do not also run normal provisioning on the source this pass).
 
 3. `Migrate != nil && server.DryRun` → log `[DRY RUN] would migrate <db> from
    <source> to <target> (confirm_drop=<bool>)` and `continue`. No connections
    opened, no config write.
 
-### `runMigration(config *Config, source DatabaseServer, db *DatabaseConfig, configPath string)`
+### `runMigration(config *Config, serverIdx int, source DatabaseServer, dbIdx int, db DatabaseConfig, configPath string)`
 
-All failure paths: set `db.Migrate.Error`, leave `Completed=false`, log, and
-return the mutated `MigrateConfig` to `processConfig` as a pending status update
-(the actual file write is deferred — see "Config persistence"). Never fatal — a
-failed migration must not stop the rest of `processConfig`.
+All failure paths: set `Error`, leave `Completed=false`, persist via the
+"Config persistence" write, log, and return `nil` (never fatal — a failed
+migration must not stop the rest of `processConfig`).
 
 1. **Resolve target.** Find `config.Servers[i].Name == db.Migrate.TargetServer`.
    Not found → error `"target server %q not found"`. `detectDBType` of its
@@ -114,8 +113,7 @@ failed migration must not stop the rest of `processConfig`.
    drop sets `Error` to the drop error but keeps `Completed = true` (the
    migration itself succeeded).
 
-6. Return the final `MigrateConfig` to `processConfig` as a pending status
-   update; the file write happens after the pass (see "Config persistence").
+6. Persist the final `MigrateConfig` (see "Config persistence").
 
 ## Verification
 
@@ -148,19 +146,23 @@ DB sizes; swap to pg_class.reltuples estimates if this gets slow.`
 
 ## Config persistence
 
-`runMigration` and the admin handler both mutate the on-disk config. Follow the
-existing admin pattern: hold `configMu.Lock()`, re-read the file from disk,
-unmarshal, apply the mutation by server index + database index, `json.MarshalIndent`,
-`os.WriteFile(configPath, out, 0600)`.
+`processConfig` runs **without** holding `configMu` (it operates on an in-memory
+copy loaded under `RLock` before the pass). So `runMigration` persists its result
+directly, using the same pattern every admin handler uses:
 
-`runMigration` is called from `processConfig`, which already holds
-`configMu.RLock()` for the duration of the pass. To avoid a lock upgrade, the
-migration result is written via a small helper that is invoked **after** the
-provisioning loop releases the read lock — i.e. `processConfig` collects pending
-migration-status updates `(serverIdx, dbIdx, MigrateConfig)` during the pass and
-applies them under `configMu.Lock()` at the end, re-reading the file first. The
-`DROP DATABASE` on the source and all dump/restore/verify work happen during the
-pass; only the file write is deferred.
+```
+configMu.Lock()
+re-read configPath from disk, json.Unmarshal into a fresh Config
+cfg.Servers[serverIdx].Databases[dbIdx].Migrate = &finalMigrateConfig
+json.MarshalIndent + os.WriteFile(configPath, out, 0600)
+configMu.Unlock()
+```
+
+Re-reading from disk (rather than writing back the whole in-memory `config`)
+avoids clobbering an admin edit made during a long-running pass. `runMigration`
+therefore takes `serverIdx` and `dbIdx` alongside the server and db values. The
+`DROP DATABASE` on the source and all dump/restore/verify work happen before this
+write.
 
 ## Admin UI
 
