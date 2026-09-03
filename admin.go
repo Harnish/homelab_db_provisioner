@@ -28,6 +28,16 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
 	"join":            strings.Join,
 	"secretName":      secretNameFor,
 	"backupOrDefault": backupOrDefault,
+	"dbType": func(connStr string) string {
+		switch detectDBType(connStr) {
+		case MariaDB:
+			return "mariadb"
+		case MongoDB:
+			return "mongodb"
+		default:
+			return "postgres"
+		}
+	},
 }).Parse(`<!DOCTYPE html>
 <html>
 <head>
@@ -60,7 +70,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
   {{range $si, $server := .Servers}}
     <h3>{{$server.Name}}</h3>
     <table>
-      <tr><th>Database</th><th>User</th><th>Permissions</th><th>Extensions</th><th>{{if $.K8sEnabled}}Kubernetes Secret{{else}}Change Password{{end}}</th><th>Backup</th></tr>
+      <tr><th>Database</th><th>User</th><th>Permissions</th><th>Extensions</th><th>{{if $.K8sEnabled}}Kubernetes Secret{{else}}Change Password{{end}}</th><th>Backup</th><th>Migrate</th></tr>
       {{range $di, $db := $server.Databases}}
       <tr>
         <td>{{$db.Database}}</td>
@@ -104,6 +114,40 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
             <label style="display:inline;margin:0;"><input type="checkbox" name="backup_restore_on_create" {{if $backup.RestoreOnCreate}}checked{{end}}> Restore on Create</label>
             <button type="submit">Save</button>
           </form>
+        </td>
+        <td>
+          {{if ne (dbType $server.RootConnectionString) "postgres"}}&mdash;
+          {{else if not $db.Migrate}}
+            <form method="POST" action="/migrate-database" style="display:inline-flex;gap:0.25rem;align-items:center;flex-wrap:wrap;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <select name="target_server">
+                <option value="">&mdash; target &mdash;</option>
+                {{range $.PGServerNames}}{{if ne . $server.Name}}<option value="{{.}}">{{.}}</option>{{end}}{{end}}
+              </select>
+              <label style="display:inline;margin:0;"><input type="checkbox" name="confirm_drop"> drop source</label>
+              <button type="submit">Migrate</button>
+            </form>
+          {{else if $db.Migrate.Completed}}
+            <span>migrated to {{$db.Migrate.TargetServer}} at {{$db.Migrate.CompletedAt}}</span>
+            {{if $db.Migrate.Error}}<br><small class="flash-err">{{$db.Migrate.Error}}</small>{{end}}
+            <form method="POST" action="/migrate-database" style="display:inline;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <input type="hidden" name="target_server" value="">
+              <button type="submit">Clear</button>
+            </form>
+          {{else if $db.Migrate.Error}}
+            <span class="flash-err">migration error: {{$db.Migrate.Error}}</span>
+            <form method="POST" action="/migrate-database" style="display:inline;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <input type="hidden" name="target_server" value="">
+              <button type="submit">Retry (clear)</button>
+            </form>
+          {{else}}
+            <span>migrating to {{$db.Migrate.TargetServer}}&hellip;</span>
+          {{end}}
         </td>
       </tr>
       {{end}}
@@ -174,6 +218,9 @@ type adminTemplateData struct {
 	FlashError bool
 	K8sEnabled bool
 	Namespace  string
+	// PGServerNames lists the names of all PostgreSQL servers, offered as
+	// migration targets in the admin UI.
+	PGServerNames []string
 }
 
 func newAdminHandler(configPath string) http.Handler {
@@ -264,6 +311,11 @@ func handleIndex(configPath string) http.HandlerFunc {
 		}
 		if secretsManager != nil {
 			tmplData.Namespace = secretsManager.namespace
+		}
+		for _, s := range cfg.Servers {
+			if detectDBType(s.RootConnectionString) == PostgreSQL {
+				tmplData.PGServerNames = append(tmplData.PGServerNames, s.Name)
+			}
 		}
 		if err := adminTemplate.Execute(w, tmplData); err != nil {
 			log.Printf("template execute error: %v", err)

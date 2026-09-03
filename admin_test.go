@@ -250,6 +250,47 @@ func TestUpdatePassword_InvalidDBIndex(t *testing.T) {
 	}
 }
 
+func TestIndex_ShowsMigrateFormForPostgres(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	cfg := `{"servers":[
+		{"name":"old-pg","root_connection_string":"postgres://r:p@old/postgres","databases":[{"database":"app","user":"app","password":"pw"}]},
+		{"name":"new-pg","root_connection_string":"postgres://r:p@new/postgres","databases":[]}
+	]}`
+	h := newAdminHandler(makeTestConfig(t, cfg))
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, `action="/migrate-database"`) {
+		t.Error("expected migrate form")
+	}
+	if !strings.Contains(body, `value="new-pg"`) {
+		t.Error("expected new-pg as a migrate target option")
+	}
+}
+
+func TestIndex_ShowsMigrateStatusBadge(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	cfg := `{"servers":[{"name":"old-pg","root_connection_string":"postgres://r:p@old/postgres","databases":[{"database":"app","user":"app","password":"pw","migrate":{"target_server":"new-pg","completed":true,"completed_at":"2026-09-03T12:00:00Z"}}]}]}`
+	h := newAdminHandler(makeTestConfig(t, cfg))
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "migrated to new-pg") {
+		t.Errorf("expected completed badge, body:\n%s", body)
+	}
+	if !strings.Contains(body, "Clear") {
+		t.Error("completed row should offer a Clear button")
+	}
+}
+
 func TestMigrateDatabase_SetsBlock(t *testing.T) {
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD", "secret")
