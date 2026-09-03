@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -53,6 +55,17 @@ func TestIsConnectionError(t *testing.T) {
 	}
 	if isConnectionError("pg_dump: error: permission denied for table foo") {
 		t.Error("permission error misclassified as connection error")
+	}
+}
+
+func TestPgDumpError_Unwrap(t *testing.T) {
+	inner := fmt.Errorf("exit status 1")
+	e := &pgDumpError{err: inner, stderr: "could not connect"}
+	if !strings.Contains(e.Error(), "could not connect") {
+		t.Errorf("Error() = %q", e.Error())
+	}
+	if !errors.Is(e, inner) {
+		t.Error("expected Unwrap to expose inner error")
 	}
 }
 
