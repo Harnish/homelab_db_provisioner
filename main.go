@@ -26,6 +26,14 @@ type BackupConfig struct {
 	RestoreOnCreate bool   `json:"restore_on_create"` // restore newest backup when db is newly created
 }
 
+type MigrateConfig struct {
+	TargetServer string `json:"target_server"`          // Name of a DatabaseServer already present in config.Servers
+	ConfirmDrop  bool   `json:"confirm_drop,omitempty"` // drop the database on the source server after a verified restore
+	Completed    bool   `json:"completed,omitempty"`    // set true by the provisioner on success
+	CompletedAt  string `json:"completed_at,omitempty"` // RFC3339 timestamp, set on success
+	Error        string `json:"error,omitempty"`        // last failure message; cleared on success
+}
+
 type S3Config struct {
 	Bucket   string `json:"bucket"`
 	Region   string `json:"region"`
@@ -34,13 +42,14 @@ type S3Config struct {
 }
 
 type DatabaseConfig struct {
-	Database              string        `json:"database"`
-	User                  string        `json:"user"`
-	Password              string        `json:"password"`
-	Permissions           []string      `json:"permissions"`
-	Extensions            []string      `json:"extensions,omitempty"`
-	Backup                *BackupConfig `json:"backup,omitempty"`
-	RequiresConnectString bool          `json:"requires_connect_string,omitempty"`
+	Database              string         `json:"database"`
+	User                  string         `json:"user"`
+	Password              string         `json:"password"`
+	Permissions           []string       `json:"permissions"`
+	Extensions            []string       `json:"extensions,omitempty"`
+	Backup                *BackupConfig  `json:"backup,omitempty"`
+	RequiresConnectString bool           `json:"requires_connect_string,omitempty"`
+	Migrate               *MigrateConfig `json:"migrate,omitempty"`
 }
 
 type DatabaseServer struct {
