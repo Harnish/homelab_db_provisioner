@@ -195,7 +195,18 @@ func newAdminHandler(configPath string) http.Handler {
 	mux.HandleFunc("POST /api/servers/{si}/databases", handleAPICreateDatabase(configPath))
 	mux.HandleFunc("PATCH /api/servers/{si}/databases/{di}", handleAPIUpdateDatabase(configPath))
 	mux.HandleFunc("DELETE /api/servers/{si}/databases/{di}", handleAPIDeleteDatabase(configPath))
-	return basicAuth(mux)
+
+	protected := basicAuth(mux)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Answer favicon.ico without an auth challenge. A 401 on a path the
+		// browser fetches on its own (favicon) pops a second Basic Auth
+		// dialog on top of the one for "/".
+		if r.URL.Path == "/favicon.ico" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	})
 }
 
 func startAdminServer(configPath string) {
