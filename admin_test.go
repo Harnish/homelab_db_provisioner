@@ -94,6 +94,23 @@ func TestBasicAuth_WrongPassword(t *testing.T) {
 	}
 }
 
+func TestFavicon_NoAuthChallenge(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	req := httptest.NewRequest("GET", "/favicon.ico", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	if w.Header().Get("WWW-Authenticate") != "" {
+		t.Fatal("favicon should not send an auth challenge")
+	}
+}
+
 func TestBasicAuth_Authorized(t *testing.T) {
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD", "secret")
