@@ -59,6 +59,9 @@ func runBackups(config *Config, configPath string, t time.Time) {
 		}
 
 		for _, db := range server.Databases {
+			if db.Migrate != nil && db.Migrate.Completed {
+				continue
+			}
 			if db.Backup == nil || !db.Backup.Enabled {
 				continue
 			}
@@ -105,13 +108,21 @@ func runBackups(config *Config, configPath string, t time.Time) {
 	}
 }
 
-func backupPostgreSQL(rootConnStr, database, destFile string) error {
+// connStrWithDB rewrites a root connection URL to point at a specific database.
+func connStrWithDB(rootConnStr, database string) (string, error) {
 	u, err := url.Parse(rootConnStr)
 	if err != nil {
-		return fmt.Errorf("parse connection string: %w", err)
+		return "", fmt.Errorf("parse connection string: %w", err)
 	}
 	u.Path = "/" + database
-	connStr := u.String()
+	return u.String(), nil
+}
+
+func backupPostgreSQL(rootConnStr, database, destFile string) error {
+	connStr, err := connStrWithDB(rootConnStr, database)
+	if err != nil {
+		return err
+	}
 
 	f, err := os.Create(destFile)
 	if err != nil {
@@ -270,12 +281,10 @@ func findNewestBackup(config *Config, configPath, serverName, database string, d
 }
 
 func restorePostgreSQL(rootConnStr, database, backupFile string) error {
-	u, err := url.Parse(rootConnStr)
+	connStr, err := connStrWithDB(rootConnStr, database)
 	if err != nil {
-		return fmt.Errorf("parse connection string: %w", err)
+		return err
 	}
-	u.Path = "/" + database
-	connStr := u.String()
 
 	f, err := os.Open(backupFile)
 	if err != nil {

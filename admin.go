@@ -28,6 +28,16 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
 	"join":            strings.Join,
 	"secretName":      secretNameFor,
 	"backupOrDefault": backupOrDefault,
+	"dbType": func(connStr string) string {
+		switch detectDBType(connStr) {
+		case MariaDB:
+			return "mariadb"
+		case MongoDB:
+			return "mongodb"
+		default:
+			return "postgres"
+		}
+	},
 }).Parse(`<!DOCTYPE html>
 <html>
 <head>
@@ -60,7 +70,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
   {{range $si, $server := .Servers}}
     <h3>{{$server.Name}}</h3>
     <table>
-      <tr><th>Database</th><th>User</th><th>Permissions</th><th>Extensions</th><th>{{if $.K8sEnabled}}Kubernetes Secret{{else}}Change Password{{end}}</th><th>Backup</th></tr>
+      <tr><th>Database</th><th>User</th><th>Permissions</th><th>Extensions</th><th>{{if $.K8sEnabled}}Kubernetes Secret{{else}}Change Password{{end}}</th><th>Backup</th><th>Migrate</th></tr>
       {{range $di, $db := $server.Databases}}
       <tr>
         <td>{{$db.Database}}</td>
@@ -104,6 +114,40 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
             <label style="display:inline;margin:0;"><input type="checkbox" name="backup_restore_on_create" {{if $backup.RestoreOnCreate}}checked{{end}}> Restore on Create</label>
             <button type="submit">Save</button>
           </form>
+        </td>
+        <td>
+          {{if ne (dbType $server.RootConnectionString) "postgres"}}&mdash;
+          {{else if not $db.Migrate}}
+            <form method="POST" action="/migrate-database" style="display:inline-flex;gap:0.25rem;align-items:center;flex-wrap:wrap;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <select name="target_server">
+                <option value="">&mdash; target &mdash;</option>
+                {{range $.PGServerNames}}{{if ne . $server.Name}}<option value="{{.}}">{{.}}</option>{{end}}{{end}}
+              </select>
+              <label style="display:inline;margin:0;"><input type="checkbox" name="confirm_drop"> drop source</label>
+              <button type="submit">Migrate</button>
+            </form>
+          {{else if $db.Migrate.Completed}}
+            <span>migrated to {{$db.Migrate.TargetServer}} at {{$db.Migrate.CompletedAt}}</span>
+            {{if $db.Migrate.Error}}<br><small class="flash-err">{{$db.Migrate.Error}}</small>{{end}}
+            <form method="POST" action="/migrate-database" style="display:inline;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <input type="hidden" name="target_server" value="">
+              <button type="submit">Clear</button>
+            </form>
+          {{else if $db.Migrate.Error}}
+            <span class="flash-err">migration error: {{$db.Migrate.Error}}</span>
+            <form method="POST" action="/migrate-database" style="display:inline;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <input type="hidden" name="target_server" value="">
+              <button type="submit">Retry (clear)</button>
+            </form>
+          {{else}}
+            <span>migrating to {{$db.Migrate.TargetServer}}&hellip;</span>
+          {{end}}
         </td>
       </tr>
       {{end}}
@@ -174,6 +218,9 @@ type adminTemplateData struct {
 	FlashError bool
 	K8sEnabled bool
 	Namespace  string
+	// PGServerNames lists the names of all PostgreSQL servers, offered as
+	// migration targets in the admin UI.
+	PGServerNames []string
 }
 
 func newAdminHandler(configPath string) http.Handler {
@@ -185,6 +232,7 @@ func newAdminHandler(configPath string) http.Handler {
 	mux.HandleFunc("/update-backup", handleUpdateBackup(configPath))
 	mux.HandleFunc("/add-database", handleAddDatabase(configPath))
 	mux.HandleFunc("/add-server", handleAddServer(configPath))
+	mux.HandleFunc("/migrate-database", handleMigrateDatabase(configPath))
 	mux.HandleFunc("GET /api/servers", handleAPIListServers(configPath))
 	mux.HandleFunc("GET /api/servers/{si}", handleAPIGetServer(configPath))
 	mux.HandleFunc("POST /api/servers", handleAPICreateServer(configPath))
@@ -264,6 +312,11 @@ func handleIndex(configPath string) http.HandlerFunc {
 		if secretsManager != nil {
 			tmplData.Namespace = secretsManager.namespace
 		}
+		for _, s := range cfg.Servers {
+			if detectDBType(s.RootConnectionString) == PostgreSQL {
+				tmplData.PGServerNames = append(tmplData.PGServerNames, s.Name)
+			}
+		}
 		if err := adminTemplate.Execute(w, tmplData); err != nil {
 			log.Printf("template execute error: %v", err)
 		}
@@ -329,6 +382,81 @@ func handleUpdatePassword(configPath string) http.HandlerFunc {
 			return
 		}
 		http.Redirect(w, r, "/?msg="+url.QueryEscape("Password updated"), http.StatusSeeOther)
+	}
+}
+
+func handleMigrateDatabase(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		si, err := strconv.Atoi(r.FormValue("server_index"))
+		if err != nil {
+			http.Error(w, "Invalid server_index", http.StatusBadRequest)
+			return
+		}
+		di, err := strconv.Atoi(r.FormValue("db_index"))
+		if err != nil {
+			http.Error(w, "Invalid db_index", http.StatusBadRequest)
+			return
+		}
+		targetServer := strings.TrimSpace(r.FormValue("target_server"))
+		confirmDrop := r.FormValue("confirm_drop") == "on"
+
+		configMu.Lock()
+		defer configMu.Unlock()
+
+		fileData, err := os.ReadFile(configPath)
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to read config"), http.StatusSeeOther)
+			return
+		}
+		var cfg Config
+		if err := json.Unmarshal(fileData, &cfg); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to parse config"), http.StatusSeeOther)
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			http.Error(w, "server_index out of range", http.StatusBadRequest)
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			http.Error(w, "db_index out of range", http.StatusBadRequest)
+			return
+		}
+
+		if targetServer == "" {
+			cfg.Servers[si].Databases[di].Migrate = nil
+		} else {
+			if _, err := resolveTargetServer(&cfg, targetServer, cfg.Servers[si].Name); err != nil {
+				http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: "+err.Error()), http.StatusSeeOther)
+				return
+			}
+			cfg.Servers[si].Databases[di].Migrate = &MigrateConfig{
+				TargetServer: targetServer,
+				ConfirmDrop:  confirmDrop,
+			}
+		}
+
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
+			return
+		}
+		if err := os.WriteFile(configPath, out, 0600); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to write config"), http.StatusSeeOther)
+			return
+		}
+		msg := "Migration scheduled"
+		if targetServer == "" {
+			msg = "Migration cleared"
+		}
+		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 	}
 }
 

@@ -26,6 +26,14 @@ type BackupConfig struct {
 	RestoreOnCreate bool   `json:"restore_on_create"` // restore newest backup when db is newly created
 }
 
+type MigrateConfig struct {
+	TargetServer string `json:"target_server"`          // Name of a DatabaseServer already present in config.Servers
+	ConfirmDrop  bool   `json:"confirm_drop,omitempty"` // drop the database on the source server after a verified restore
+	Completed    bool   `json:"completed,omitempty"`    // set true by the provisioner on success
+	CompletedAt  string `json:"completed_at,omitempty"` // RFC3339 timestamp, set on success
+	Error        string `json:"error,omitempty"`        // last failure message; cleared on success
+}
+
 type S3Config struct {
 	Bucket   string `json:"bucket"`
 	Region   string `json:"region"`
@@ -34,13 +42,14 @@ type S3Config struct {
 }
 
 type DatabaseConfig struct {
-	Database              string        `json:"database"`
-	User                  string        `json:"user"`
-	Password              string        `json:"password"`
-	Permissions           []string      `json:"permissions"`
-	Extensions            []string      `json:"extensions,omitempty"`
-	Backup                *BackupConfig `json:"backup,omitempty"`
-	RequiresConnectString bool          `json:"requires_connect_string,omitempty"`
+	Database              string         `json:"database"`
+	User                  string         `json:"user"`
+	Password              string         `json:"password"`
+	Permissions           []string       `json:"permissions"`
+	Extensions            []string       `json:"extensions,omitempty"`
+	Backup                *BackupConfig  `json:"backup,omitempty"`
+	RequiresConnectString bool           `json:"requires_connect_string,omitempty"`
+	Migrate               *MigrateConfig `json:"migrate,omitempty"`
 }
 
 type DatabaseServer struct {
@@ -186,7 +195,9 @@ func loadConfig() (*Config, error) {
 			return nil, fmt.Errorf("server %d: root connection string is required", i)
 		}
 		if len(server.Databases) == 0 {
-			return nil, fmt.Errorf("server %d (%s): at least one database configuration is required", i, server.Name)
+			// A server with no databases is valid — e.g. a freshly added
+			// migration target that databases will be migrated onto.
+			log.Printf("server %d (%s): no databases configured", i, server.Name)
 		}
 	}
 
@@ -224,6 +235,25 @@ func processConfig(config *Config) error {
 	}
 	log.Println("========================================")
 
+	// Migration pass — runs before normal provisioning so the backup fallback
+	// works even when the source server's root connection is dead.
+	for si, server := range config.Servers {
+		if detectDBType(server.RootConnectionString) != PostgreSQL {
+			continue
+		}
+		for di, dbConfig := range server.Databases {
+			if dbConfig.Migrate == nil || dbConfig.Migrate.Completed {
+				continue
+			}
+			if server.DryRun {
+				log.Printf("[DRY RUN] would migrate %s/%s to %s (confirm_drop=%v)",
+					server.Name, dbConfig.Database, dbConfig.Migrate.TargetServer, dbConfig.Migrate.ConfirmDrop)
+				continue
+			}
+			runMigration(config, si, server, di, dbConfig, getConfigPath())
+		}
+	}
+
 	// Process each server
 	for serverIdx, server := range config.Servers {
 		serverName := server.Name
@@ -237,6 +267,13 @@ func processConfig(config *Config) error {
 			log.Printf("MODE: DRY RUN (no changes will be applied)")
 		}
 		log.Printf("========================================")
+
+		// Skip servers whose every database has already been migrated away —
+		// no point opening a connection (and eating the retry timeout).
+		if allDatabasesMigrated(server) {
+			log.Printf("All databases on %s have been migrated away, skipping server", serverName)
+			continue
+		}
 
 		// Detect database type
 		dbType := detectDBType(server.RootConnectionString)
@@ -278,6 +315,12 @@ func processConfig(config *Config) error {
 			// Process each database configuration for this server
 			for i, dbConfig := range server.Databases {
 				log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
+
+				if dbConfig.Migrate != nil && dbConfig.Migrate.Completed {
+					log.Printf("migrate: %s/%s migrated to %s, skipping provisioning and backups",
+						serverName, dbConfig.Database, dbConfig.Migrate.TargetServer)
+					continue
+				}
 
 				if server.DryRun {
 					log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)
@@ -333,6 +376,12 @@ func processConfig(config *Config) error {
 		// Process each database configuration for this server
 		for i, dbConfig := range server.Databases {
 			log.Printf("Processing database %d/%d on %s: %s", i+1, len(server.Databases), serverName, dbConfig.Database)
+
+			if dbConfig.Migrate != nil && dbConfig.Migrate.Completed {
+				log.Printf("migrate: %s/%s migrated to %s, skipping provisioning and backups",
+					serverName, dbConfig.Database, dbConfig.Migrate.TargetServer)
+				continue
+			}
 
 			if server.DryRun {
 				log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)
