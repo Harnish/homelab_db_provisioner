@@ -302,10 +302,11 @@ func TestMigrateDatabase_SetsBlock(t *testing.T) {
 	h := newAdminHandler(path)
 
 	form := url.Values{
-		"server_index":  {"0"},
-		"db_index":      {"0"},
-		"target_server": {"new-pg"},
-		"confirm_drop":  {"on"},
+		"server_index":     {"0"},
+		"db_index":         {"0"},
+		"target_server":    {"new-pg"},
+		"confirm_drop":     {"on"},
+		"confirm_database": {"app"},
 	}
 	req := httptest.NewRequest("POST", "/migrate-database", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1279,5 +1280,93 @@ func TestIndex_ShowsAddServerForm(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected %q in body", want)
 		}
+	}
+}
+
+func postAdminForm(t *testing.T, h http.Handler, path string, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func TestMigrateDatabase_DropRequiresTypedName(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	cfg := `{"servers":[
+		{"name":"old-pg","root_connection_string":"postgres://r:p@old/postgres","databases":[{"database":"app","user":"app","password":"pw"}]},
+		{"name":"new-pg","root_connection_string":"postgres://r:p@new/postgres","databases":[]}
+	]}`
+	for _, form := range []url.Values{
+		{"confirm_drop": {"on"}},
+		{"confirm_database": {"ap"}},
+	} {
+		path := makeTestConfig(t, cfg)
+		form.Set("server_index", "0")
+		form.Set("db_index", "0")
+		form.Set("target_server", "new-pg")
+		w := postAdminForm(t, newAdminHandler(path), "/migrate-database", form)
+		if !strings.Contains(w.Header().Get("Location"), "Error") {
+			t.Fatalf("form %v: expected error flash, got %q", form, w.Header().Get("Location"))
+		}
+		var out Config
+		data, _ := os.ReadFile(path)
+		json.Unmarshal(data, &out)
+		if out.Servers[0].Databases[0].Migrate != nil {
+			t.Fatalf("form %v: migrate block written despite bad confirmation", form)
+		}
+	}
+}
+
+func TestGeneratePassword_NeverEchoesPassword(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	w := postAdminForm(t, newAdminHandler(path), "/generate-password", url.Values{"server_index": {"0"}, "db_index": {"0"}})
+
+	var out Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &out)
+	pw := out.Servers[0].Databases[0].Password
+	if pw == "mypass" {
+		t.Fatal("password was not changed")
+	}
+	loc, _ := url.QueryUnescape(w.Header().Get("Location"))
+	if strings.Contains(loc, pw) {
+		t.Fatalf("redirect leaks the generated password: %q", loc)
+	}
+}
+
+func TestRowActions_RejectStaleRow(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	// Page was rendered when row 0 was "otherdb"; the file has since changed.
+	w := postAdminForm(t, newAdminHandler(path), "/update-password", url.Values{
+		"server_index": {"0"}, "db_index": {"0"}, "database": {"otherdb"}, "new_password": {"x"},
+	})
+	if !strings.Contains(w.Header().Get("Location"), "Error") {
+		t.Fatalf("expected stale-row error, got %q", w.Header().Get("Location"))
+	}
+	var out Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &out)
+	if out.Servers[0].Databases[0].Password != "mypass" {
+		t.Fatal("stale form changed the wrong database's password")
+	}
+}
+
+func TestAddServer_RejectsDuplicateName(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	w := postAdminForm(t, newAdminHandler(path), "/add-server", url.Values{
+		"name": {"Test Server"}, "root_connection_string": {"postgres://r:p@x/postgres"},
+	})
+	if !strings.Contains(w.Header().Get("Location"), "Error") {
+		t.Fatalf("expected duplicate-name error, got %q", w.Header().Get("Location"))
 	}
 }
