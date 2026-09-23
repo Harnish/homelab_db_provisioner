@@ -1370,3 +1370,58 @@ func TestAddServer_RejectsDuplicateName(t *testing.T) {
 		t.Fatalf("expected duplicate-name error, got %q", w.Header().Get("Location"))
 	}
 }
+
+func TestRevealPassword_ShowsPasswordOnlyInResponse(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if strings.Contains(w.Body.String(), "mypass") {
+		t.Fatal("index page renders the password without a reveal request")
+	}
+	if !strings.Contains(w.Body.String(), `action="/reveal-password"`) {
+		t.Fatal("expected Show form when k8s secrets mode is off")
+	}
+
+	w = postAdminForm(t, h, "/reveal-password", url.Values{
+		"server_index": {"0"}, "db_index": {"0"}, "database": {"mydb"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "mypass") {
+		t.Fatal("reveal response does not contain the password")
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("expected Cache-Control: no-store, got %q", w.Header().Get("Cache-Control"))
+	}
+}
+
+func TestRevealPassword_RejectedInK8sMode(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+
+	secretsManager = &k8sSecretsManager{client: fake.NewSimpleClientset(), namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	w := postAdminForm(t, h, "/reveal-password", url.Values{"server_index": {"0"}, "db_index": {"0"}})
+	if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "mypass") {
+		t.Fatalf("expected 400 without password, got %d body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestRevealPassword_RejectsStaleRow(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	w := postAdminForm(t, newAdminHandler(makeTestConfig(t, testConfigJSON)), "/reveal-password", url.Values{
+		"server_index": {"0"}, "db_index": {"0"}, "database": {"otherdb"},
+	})
+	if w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), "mypass") {
+		t.Fatalf("expected stale-row redirect without password, got %d", w.Code)
+	}
+}

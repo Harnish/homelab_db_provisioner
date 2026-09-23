@@ -56,6 +56,9 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     td input[type=password], td select { width: auto; }
     td label { white-space: nowrap; }
     .empty { color: #555; font-style: italic; }
+    .reveal { padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; background: #e7f1ff; color: #052c65; }
+    .reveal p { margin: 0 0 0.5rem; }
+    .reveal .secret { display: inline-block; font-size: 1.1rem; padding: 0.25rem 0.5rem; background: #fff; border: 1px solid #9ec5fe; border-radius: 4px; user-select: all; overflow-wrap: anywhere; }
     .notice { padding: 0.5rem 1rem; border-radius: 4px; margin-bottom: 1rem; background: #fff3cd; color: #664d03; }
     .flash { padding: 0.5rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
     .flash-ok { background: #d4edda; color: #155724; }
@@ -72,6 +75,13 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
   <h1>DB Provisioner Admin</h1>
   {{if .Flash}}
     <div class="flash {{if .FlashError}}flash-err{{else}}flash-ok{{end}}" role="{{if .FlashError}}alert{{else}}status{{end}}">{{.Flash}}</div>
+  {{end}}
+  {{with .Reveal}}
+    <div class="reveal" role="status">
+      <p>Password for user <strong>{{.User}}</strong> on database <strong>{{.Database}}</strong> ({{.Server}}):</p>
+      <code class="secret">{{.Password}}</code>
+      <p><small>Only this response contains the password; it isn't in the URL or saved by the browser. <a href="/">Hide it</a></small></p>
+    </div>
   {{end}}
   {{if not .WatchMode}}
     <div class="notice" role="note">Watch mode is off. Changes made here are saved to the config file but won't be applied to your databases until the provisioner runs again.</div>
@@ -120,6 +130,13 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
               <input type="hidden" name="server" value="{{$server.Name}}">
               <input type="hidden" name="database" value="{{$db.Database}}">
               <button type="submit">Generate</button>
+            </form>
+            <form method="POST" action="/reveal-password" style="display:inline;">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <input type="hidden" name="server" value="{{$server.Name}}">
+              <input type="hidden" name="database" value="{{$db.Database}}">
+              <button type="submit">Show</button>
             </form>
           {{end}}
         </td>
@@ -259,6 +276,8 @@ type adminTemplateData struct {
 	K8sEnabled bool
 	Namespace  string
 	WatchMode  bool
+	// Reveal is set only on a /reveal-password response.
+	Reveal *revealedPassword
 	// PGServerNames lists the names of all PostgreSQL servers, offered as
 	// migration targets in the admin UI.
 	PGServerNames []string
@@ -269,6 +288,7 @@ func newAdminHandler(configPath string) http.Handler {
 	mux.HandleFunc("/", handleIndex(configPath))
 	mux.HandleFunc("/update-password", handleUpdatePassword(configPath))
 	mux.HandleFunc("/generate-password", handleGeneratePassword(configPath))
+	mux.HandleFunc("/reveal-password", handleRevealPassword(configPath))
 	mux.HandleFunc("/rotate-secret", handleRotateSecret(configPath))
 	mux.HandleFunc("/update-backup", handleUpdateBackup(configPath))
 	mux.HandleFunc("/add-database", handleAddDatabase(configPath))
@@ -343,25 +363,98 @@ func handleIndex(configPath string) http.HandlerFunc {
 			http.Error(w, "Config file "+configPath+" is not valid JSON: "+err.Error()+"\nFix the file and reload this page.", http.StatusInternalServerError)
 			return
 		}
-		msg := r.URL.Query().Get("msg")
-		tmplData := adminTemplateData{
-			Servers:    cfg.Servers,
-			Flash:      msg,
-			FlashError: strings.HasPrefix(msg, "Error:"),
-			K8sEnabled: secretsManager != nil,
-			WatchMode:  os.Getenv("WATCH_MODE") == "true",
+		renderIndex(w, &cfg, r.URL.Query().Get("msg"), nil)
+	}
+}
+
+type revealedPassword struct {
+	Server, Database, User, Password string
+}
+
+func renderIndex(w http.ResponseWriter, cfg *Config, msg string, reveal *revealedPassword) {
+	tmplData := adminTemplateData{
+		Servers:    cfg.Servers,
+		Flash:      msg,
+		FlashError: strings.HasPrefix(msg, "Error:"),
+		K8sEnabled: secretsManager != nil,
+		WatchMode:  os.Getenv("WATCH_MODE") == "true",
+		Reveal:     reveal,
+	}
+	if secretsManager != nil {
+		tmplData.Namespace = secretsManager.namespace
+	}
+	for _, s := range cfg.Servers {
+		if detectDBType(s.RootConnectionString) == PostgreSQL {
+			tmplData.PGServerNames = append(tmplData.PGServerNames, s.Name)
+		}
+	}
+	if err := adminTemplate.Execute(w, tmplData); err != nil {
+		log.Printf("template execute error: %v", err)
+	}
+}
+
+// handleRevealPassword shows one database's password when Kubernetes Secret
+// mode is off (the config file is then the only place it lives). The password
+// is only ever in this POST response body: never in a URL or flash message,
+// and never cached.
+func handleRevealPassword(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
 		if secretsManager != nil {
-			tmplData.Namespace = secretsManager.namespace
+			http.Error(w, "Passwords live in Kubernetes Secrets in this mode; read them with kubectl", http.StatusBadRequest)
+			return
 		}
-		for _, s := range cfg.Servers {
-			if detectDBType(s.RootConnectionString) == PostgreSQL {
-				tmplData.PGServerNames = append(tmplData.PGServerNames, s.Name)
-			}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
 		}
-		if err := adminTemplate.Execute(w, tmplData); err != nil {
-			log.Printf("template execute error: %v", err)
+		si, err := strconv.Atoi(r.FormValue("server_index"))
+		if err != nil {
+			http.Error(w, "Invalid server_index", http.StatusBadRequest)
+			return
 		}
+		di, err := strconv.Atoi(r.FormValue("db_index"))
+		if err != nil {
+			http.Error(w, "Invalid db_index", http.StatusBadRequest)
+			return
+		}
+
+		configMu.RLock()
+		fileData, err := os.ReadFile(configPath)
+		configMu.RUnlock()
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to read config"), http.StatusSeeOther)
+			return
+		}
+		var cfg Config
+		if err := json.Unmarshal(fileData, &cfg); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to parse config"), http.StatusSeeOther)
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			http.Error(w, "server_index out of range", http.StatusBadRequest)
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			http.Error(w, "db_index out of range", http.StatusBadRequest)
+			return
+		}
+		if staleRow(r, &cfg, si, di) {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape(staleRowMsg), http.StatusSeeOther)
+			return
+		}
+
+		db := cfg.Servers[si].Databases[di]
+		w.Header().Set("Cache-Control", "no-store")
+		renderIndex(w, &cfg, "", &revealedPassword{
+			Server:   cfg.Servers[si].Name,
+			Database: db.Database,
+			User:     db.User,
+			Password: db.Password,
+		})
 	}
 }
 
@@ -625,7 +718,7 @@ func handleGeneratePassword(configPath string) http.HandlerFunc {
 		}
 		// The password is never echoed: ?msg= ends up in browser history and
 		// proxy logs. It lives in the config file only.
-		msg := fmt.Sprintf("Generated a new password for %s and saved it to the config file", dbName)
+		msg := fmt.Sprintf("Generated a new password for %s and saved it to the config file. Use Show to view it.", dbName)
 		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 	}
 }

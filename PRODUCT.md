@@ -36,7 +36,7 @@ The config file (`config.json` or a Kubernetes ConfigMap) is the source of truth
 - Server-rendered admin UI: one inline Go `html/template` in `admin.go` with form POSTs and redirect-with-flash-message. A JSON REST API (`/api/servers/...`) sits beside it.
 - UI actions: view servers and databases; add a server; add a database; change or generate a password; rotate a Kubernetes Secret; edit backup settings; set or clear a migration.
 - Terminology: *server* (a `DatabaseServer` with a root connection string), *database* (a `DatabaseConfig` entry), *migration tombstone* (a completed migrate entry that provisioning skips), *dry run* (per-server; SQL is logged, not executed).
-- **Secrets are never shown in plain text.** Passwords and connection strings must not render in the UI. Flash messages travel in the `?msg=` URL, so they must never carry a secret.
+- **Secrets stay hidden until explicitly requested.** The page never renders a password by default. Without Kubernetes Secret mode, the config file is the only place a password lives, so the operator must be able to see it: a per-row Show action POSTs to `/reveal-password`, and only that `no-store` response body contains it. In Kubernetes Secret mode the UI never reveals passwords (use `kubectl`). Flash messages travel in the `?msg=` URL, so they must never carry a secret.
 - **Dangerous operations need guardrails.** Dropping the source after a migration, password changes, secret rotation, and deletes need explicit, deliberate confirmation. Current pattern: typing the database name back to drop the migration source (checked on the server), plus a confirmation step on Generate, Rotate, and Clear migration.
 - Undecided: whether the UI must keep working without JavaScript, and whether it must be usable on a phone.
 
@@ -51,5 +51,5 @@ The config file (`config.json` or a Kubernetes ConfigMap) is the source of truth
 1. **The file is the truth.** The UI reflects and edits the config; it never diverges from it or hides what it wrote.
 2. **Status first.** An occasional visitor should see what's healthy, what's failing, and what's pending before they see any forms.
 3. **Destructive means deliberate.** The more irreversible the action, the more explicit the confirmation.
-4. **Credentials stay out of sight.** Point to where a secret lives (a K8s Secret, the config file). Don't display it.
+4. **Credentials stay out of sight until asked for.** Point to where a secret lives. Reveal one only on a deliberate per-row request, and never in a URL.
 5. **Built for the rare visit.** Labels and states should explain themselves to an operator who hasn't opened the UI in months.
