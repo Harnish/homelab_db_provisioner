@@ -14,7 +14,7 @@ A Go-based application that automates PostgreSQL and MariaDB/MySQL database and 
 - Connection retry logic for reliability
 - Configurable via JSON
 - **Watch mode**: Continuously monitors config file for changes
-- **Admin web UI**: Optional browser-based interface to add databases and change passwords
+- **Admin web UI**: Optional browser-based interface to add databases and change passwords ([screenshots](#admin-web-ui))
 - **Automated backups**: Scheduled daily or weekly backups with configurable retention (PostgreSQL: `pg_dump`, MariaDB: `mysqldump`)
 - **Auto-restore**: Optionally restores from the newest backup when a database is first created
 - **Kubernetes native**: Works seamlessly with ConfigMaps
@@ -329,6 +329,18 @@ The root connection string must point to the `admin` database so the provisioner
 
 An optional browser-based interface lets you add new database entries and change passwords without editing the config file manually. Changes are written to disk and picked up automatically when running in watch mode.
 
+![Admin UI overview: servers with per-database backup and migration status, plus Add Database and Add Server forms](docs/screenshots/admin-overview.png)
+
+Each server lists its health first (failed or pending migrations, overdue or missing backups, migrated entries to clean up), then one row per database. **Manage** opens that database's password, backup, and migration controls:
+
+![A database row expanded to show its password, backup, and migration controls](docs/screenshots/admin-manage.png)
+
+The UI follows your operating system's light or dark setting:
+
+![Admin UI in dark mode with a pending migration expanded](docs/screenshots/admin-dark.png)
+
+<sub>Screenshots use sample data; no real credentials are shown.</sub>
+
 ### Enabling the Admin UI
 
 Set all three environment variables:
@@ -361,10 +373,14 @@ Then open `http://localhost:8080` in your browser. You will be prompted for the 
 
 ### Features
 
-- View all configured databases across all servers
-- Change the password for any existing database user
-- Add a new database entry to any server (with optional custom permissions)
-- Edit each database's backup settings (enabled, schedule, keep count, restore-on-create) — see [Backups](#backups) for what these fields do
+- **Status at a glance**: each server summarizes what needs attention (failed or pending migrations, overdue backups, databases with no backup yet, migrated entries to clean up), and each database row shows its user, access, extensions, backup schedule with last backup age, and migration state
+- **Passwords**: show a database's current password on request (never in the URL, never cached), generate a new random one, or set your own. In [Kubernetes Secrets Mode](#kubernetes-secrets-mode) the UI shows each Secret's name and rotates it instead; read the password with `kubectl`
+- **Backups**: edit each database's backup settings (enabled, schedule, keep count, restore-on-create). See [Backups](#backups) for what these fields do
+- **Migrations** (PostgreSQL): schedule a move to another PostgreSQL server, optionally dropping the source after a verified copy (you type the database name to confirm), cancel a pending migration, or clear a completed one
+- **Add a database** to any server, with optional custom permissions and backup settings
+- **Add a server**, optionally in dry-run mode (SQL is logged, not executed)
+- **Guardrails**: password changes, secret rotation, and clearing a migration ask for confirmation, and an edit is refused if its database row was moved or renamed in the config file after the page loaded
+- **Light and dark themes** that follow your operating system setting
 
 > **Note:** The admin UI is most useful with `WATCH_MODE=true`. In one-shot mode the process exits after the first run and the UI has no time to apply changes.
 

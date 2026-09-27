@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -137,7 +138,7 @@ func TestIndex_ShowsDatabasesAndForms(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	body := w.Body.String()
-	for _, want := range []string{"Test Server", "mydb", "myuser", "Add Database", "Change Password"} {
+	for _, want := range []string{"Test Server", "mydb", "myuser", "Add Database", `action="/update-password"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected %q in body", want)
 		}
@@ -283,7 +284,7 @@ func TestIndex_ShowsMigrateStatusBadge(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	body := w.Body.String()
-	if !strings.Contains(body, "migrated to new-pg") {
+	if !strings.Contains(body, "migrated to <strong>new-pg</strong>") {
 		t.Errorf("expected completed badge, body:\n%s", body)
 	}
 	if !strings.Contains(body, "Clear") {
@@ -1423,5 +1424,54 @@ func TestRevealPassword_RejectsStaleRow(t *testing.T) {
 	})
 	if w.Code != http.StatusSeeOther || strings.Contains(w.Body.String(), "mypass") {
 		t.Fatalf("expected stale-row redirect without password, got %d", w.Code)
+	}
+}
+
+func TestBackupAge(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	today := time.Date(2026, 9, 27, 0, 0, 0, 0, time.Local)
+	daily := DatabaseConfig{Database: "app", Backup: &BackupConfig{Enabled: true, Schedule: "daily"}}
+	weekly := DatabaseConfig{Database: "app", Backup: &BackupConfig{Enabled: true, Schedule: "weekly"}}
+
+	if state, _ := backupAge(cfgPath, "My Server", daily, today); state != "none" {
+		t.Errorf("no files: got %q, want none", state)
+	}
+
+	dir := filepath.Join(filepath.Dir(cfgPath), "backups", slugify("My Server"), "app")
+	os.MkdirAll(dir, 0o755)
+	for _, name := range []string{"app_2026-09-20.sql.gz", "app_2026-09-24.sql.gz"} {
+		os.WriteFile(filepath.Join(dir, name), nil, 0o600)
+	}
+	if state, age := backupAge(cfgPath, "My Server", daily, today); state != "overdue" || age != "3 days ago" {
+		t.Errorf("daily, 3 days old: got %q %q, want overdue \"3 days ago\"", state, age)
+	}
+	if state, _ := backupAge(cfgPath, "My Server", weekly, today); state != "ok" {
+		t.Errorf("weekly, 3 days old: got %q, want ok", state)
+	}
+	os.WriteFile(filepath.Join(dir, "app_2026-09-26.sql.gz"), nil, 0o600)
+	if state, age := backupAge(cfgPath, "My Server", daily, today); state != "ok" || age != "yesterday" {
+		t.Errorf("daily, yesterday: got %q %q, want ok yesterday", state, age)
+	}
+}
+
+func TestAdmin_RejectsCrossSiteWrites(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+	form := url.Values{"name": {"evil"}, "root_connection_string": {"postgres://u:p@evil:5432/postgres"}}
+
+	for site, want := range map[string]int{"cross-site": http.StatusForbidden, "same-origin": http.StatusSeeOther} {
+		req := httptest.NewRequest("POST", "/add-server", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Sec-Fetch-Site", site)
+		req.SetBasicAuth("admin", "secret")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Errorf("Sec-Fetch-Site %s: got %d, want %d", site, w.Code, want)
+		}
+		if w.Header().Get("X-Frame-Options") != "DENY" {
+			t.Errorf("Sec-Fetch-Site %s: missing X-Frame-Options", site)
+		}
 	}
 }
