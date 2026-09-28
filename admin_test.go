@@ -50,6 +50,18 @@ const testConfigWithBackupJSON = `{
   ]
 }`
 
+const testConfigK8sJSON = `{
+  "servers": [
+    {
+      "name": "Test Server",
+      "root_connection_string": "postgres://root:pass@localhost/postgres",
+      "databases": [
+        {"database": "mydb", "user": "myuser", "k8s_secret": "mydb-credentials"}
+      ]
+    }
+  ]
+}`
+
 func makeTestConfig(t *testing.T, content string) string {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "config*.json")
@@ -699,7 +711,38 @@ func TestAddServer_WrongMethod(t *testing.T) {
 	}
 }
 
-func TestIndex_ShowsK8sSecretColumnWhenEnabled(t *testing.T) {
+func TestIndex_ShowsK8sSecretWhenOptedIn(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	h := newAdminHandler(makeTestConfig(t, testConfigK8sJSON))
+
+	secretsManager = &k8sSecretsManager{client: fake.NewSimpleClientset(), namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	wantName := "mydb-credentials"
+	for _, want := range []string{
+		"Rotate", "Kubernetes Secret",
+		"name: " + wantName + "\n      key: password",
+		"kubectl get secret " + wantName + " -n default",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in body", want)
+		}
+	}
+	for _, unwanted := range []string{`action="/update-password"`, `action="/move-to-secret"`} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("did not expect %s for a database already in a Secret", unwanted)
+		}
+	}
+}
+
+func TestIndex_OffersMoveForConfigPasswordInK8sMode(t *testing.T) {
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD", "secret")
 	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
@@ -713,14 +756,123 @@ func TestIndex_ShowsK8sSecretColumnWhenEnabled(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	body := w.Body.String()
-	wantName := secretNameFor("Test Server", "mydb")
-	for _, want := range []string{wantName, "Rotate", "Kubernetes Secret"} {
+	for _, want := range []string{`action="/update-password"`, `action="/move-to-secret"`, `name="secret_name" value="mydb-credentials"`} {
 		if !strings.Contains(body, want) {
-			t.Errorf("expected %q in body", want)
+			t.Errorf("expected %s for a database still on its config password", want)
 		}
 	}
-	if strings.Contains(body, `action="/update-password"`) {
-		t.Error("did not expect manual password form when k8s secrets enabled")
+}
+
+func TestMoveToSecret_KeepsPasswordAndClearsConfig(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+
+	client := fake.NewSimpleClientset()
+	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	w := postAdminForm(t, newAdminHandler(path), "/move-to-secret", url.Values{
+		"server_index": {"0"}, "db_index": {"0"}, "database": {"mydb"},
+	})
+	if loc := w.Header().Get("Location"); w.Code != http.StatusSeeOther || strings.Contains(loc, "Error") {
+		t.Fatalf("expected success redirect, got %d %q", w.Code, loc)
+	}
+
+	secret, err := client.CoreV1().Secrets("default").Get(context.Background(), "mydb-credentials", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected secret to be created: %v", err)
+	}
+	if string(secret.Data["password"]) != "mypass" {
+		t.Errorf("secret password = %q, want the existing config password", secret.Data["password"])
+	}
+
+	var out Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &out)
+	db := out.Servers[0].Databases[0]
+	if db.K8sSecret != "mydb-credentials" || db.Password != "" {
+		t.Errorf("expected k8s_secret stored and password cleared, got %+v", db)
+	}
+}
+
+func TestMoveToSecret_RejectsNameInUse(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	cfg := `{"servers":[{"name":"pg","root_connection_string":"postgres://r:p@h/postgres","databases":[
+		{"database":"a","user":"a","k8s_secret":"shared-credentials"},
+		{"database":"b","user":"b","password":"pw"}
+	]}]}`
+	path := makeTestConfig(t, cfg)
+
+	client := fake.NewSimpleClientset()
+	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	w := postAdminForm(t, newAdminHandler(path), "/move-to-secret", url.Values{
+		"server_index": {"0"}, "db_index": {"1"}, "database": {"b"}, "secret_name": {"shared-credentials"},
+	})
+	if !strings.Contains(w.Header().Get("Location"), "Error") {
+		t.Fatalf("expected name-in-use error, got %q", w.Header().Get("Location"))
+	}
+	if n := len(client.Actions()); n != 0 {
+		t.Errorf("expected no Kubernetes calls, got %v", client.Actions())
+	}
+}
+
+func TestMoveToSecret_DisabledWhenManagerNil(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	secretsManager = nil
+	w := postAdminForm(t, newAdminHandler(makeTestConfig(t, testConfigJSON)), "/move-to-secret", url.Values{"server_index": {"0"}, "db_index": {"0"}})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAddDatabase_BlankPasswordIsGenerated(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+
+	w := postAdminForm(t, newAdminHandler(path), "/add-database", url.Values{
+		"server_index": {"0"}, "database": {"newdb"}, "user": {"newuser"}, "password": {""},
+	})
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	}
+	var out Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &out)
+	pw := out.Servers[0].Databases[1].Password
+	if len(pw) != 20 {
+		t.Fatalf("expected a generated 20-char password, got %q", pw)
+	}
+	if loc, _ := url.QueryUnescape(w.Header().Get("Location")); strings.Contains(loc, pw) {
+		t.Fatalf("redirect leaks the generated password: %q", loc)
+	}
+}
+
+func TestAddDatabase_K8sModeStartsInSecret(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+
+	secretsManager = &k8sSecretsManager{client: fake.NewSimpleClientset(), namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	w := postAdminForm(t, newAdminHandler(path), "/add-database", url.Values{
+		"server_index": {"0"}, "database": {"newdb"}, "user": {"newuser"},
+	})
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	}
+	var out Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &out)
+	added := out.Servers[0].Databases[1]
+	if added.K8sSecret != "newdb-credentials" || added.Password != "" {
+		t.Errorf("expected new database in Secret newdb-credentials with no config password, got %+v", added)
 	}
 }
 
@@ -733,7 +885,7 @@ func TestIndex_ShowsConnectionStringMarkerWhenRequired(t *testing.T) {
 	      "name": "Test Server",
 	      "root_connection_string": "postgres://root:pass@localhost/postgres",
 	      "databases": [
-	        {"database": "mydb", "user": "myuser", "password": "mypass", "requires_connect_string": true}
+	        {"database": "mydb", "user": "myuser", "requires_connect_string": true, "k8s_secret": "mydb-credentials"}
 	      ]
 	    }
 	  ]
@@ -748,8 +900,12 @@ func TestIndex_ShowsConnectionStringMarkerWhenRequired(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if !strings.Contains(w.Body.String(), "+ connection_string") {
+	body := w.Body.String()
+	if !strings.Contains(body, "+ connection_string") {
 		t.Error("expected connection_string marker in body when RequiresConnectString is true")
+	}
+	if !strings.Contains(body, "key: connection_string") {
+		t.Error("expected connection_string secretKeyRef in the env snippet")
 	}
 }
 
@@ -794,8 +950,7 @@ func TestIndex_HidesK8sSecretColumnWhenDisabled(t *testing.T) {
 func TestRotateSecret_Success(t *testing.T) {
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD", "secret")
-	path := makeTestConfig(t, testConfigJSON)
-	h := newAdminHandler(path)
+	h := newAdminHandler(makeTestConfig(t, testConfigK8sJSON))
 
 	client := fake.NewSimpleClientset()
 	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
@@ -808,28 +963,16 @@ func TestRotateSecret_Success(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("expected 303, got %d body=%s", w.Code, w.Body.String())
+	if loc := w.Header().Get("Location"); w.Code != http.StatusSeeOther || strings.Contains(loc, "Error") {
+		t.Fatalf("expected success redirect, got %d %q", w.Code, loc)
 	}
 
-	secret, err := client.CoreV1().Secrets("default").Get(context.Background(), secretNameFor("Test Server", "mydb"), metav1.GetOptions{})
+	secret, err := client.CoreV1().Secrets("default").Get(context.Background(), "mydb-credentials", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("expected secret to exist: %v", err)
 	}
 	if len(secret.Data["password"]) == 0 {
 		t.Error("expected password to be set on the secret")
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Servers[0].Databases[0].Password != "mypass" {
-		t.Errorf("expected config.json password untouched, got %q", cfg.Servers[0].Databases[0].Password)
 	}
 }
 
@@ -849,7 +992,7 @@ func TestRotateSecret_ReturnsQuicklyEvenWithUnreachableServer(t *testing.T) {
 	      "name": "Unreachable Server",
 	      "root_connection_string": "postgres://root:pass@10.255.255.1:5999/postgres",
 	      "databases": [
-	        {"database": "mydb", "user": "myuser", "password": "mypass"}
+	        {"database": "mydb", "user": "myuser", "k8s_secret": "mydb-credentials"}
 	      ]
 	    }
 	  ]
@@ -1402,10 +1545,11 @@ func TestRevealPassword_ShowsPasswordOnlyInResponse(t *testing.T) {
 	}
 }
 
-func TestRevealPassword_RejectedInK8sMode(t *testing.T) {
+func TestRevealPassword_RejectedForSecretBackedDatabase(t *testing.T) {
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD", "secret")
-	h := newAdminHandler(makeTestConfig(t, testConfigJSON))
+	// A stray config password on a secret-backed row must still not be shown.
+	h := newAdminHandler(makeTestConfig(t, strings.Replace(testConfigK8sJSON, `"k8s_secret": "mydb-credentials"`, `"k8s_secret": "mydb-credentials", "password": "mypass"`, 1)))
 
 	secretsManager = &k8sSecretsManager{client: fake.NewSimpleClientset(), namespace: "default"}
 	defer func() { secretsManager = nil }()

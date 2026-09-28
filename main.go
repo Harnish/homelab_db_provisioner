@@ -49,6 +49,7 @@ type DatabaseConfig struct {
 	Extensions            []string       `json:"extensions,omitempty"`
 	Backup                *BackupConfig  `json:"backup,omitempty"`
 	RequiresConnectString bool           `json:"requires_connect_string,omitempty"`
+	K8sSecret             string         `json:"k8s_secret,omitempty"` // name of the Kubernetes Secret holding the password; empty means Password is used
 	Migrate               *MigrateConfig `json:"migrate,omitempty"`
 }
 
@@ -323,14 +324,11 @@ func processConfig(config *Config) error {
 				}
 
 				if server.DryRun {
-					log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)
-					if dbConfig.RequiresConnectString {
-						log.Printf("[DRY RUN] Would store connection_string in Kubernetes secret %s for %s on %s", secretNameFor(serverName, dbConfig.Database), dbConfig.Database, serverName)
-					}
+					logDryRunK8sSecret(dbConfig, serverName)
 				} else {
 					var k8sErr error
 					k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
-					dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, server.RootConnectionString, dbConfig)
+					dbConfig, k8sErr = applyK8sPassword(k8sCtx, server.RootConnectionString, dbConfig)
 					k8sCancel()
 					if k8sErr != nil {
 						log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
@@ -384,14 +382,11 @@ func processConfig(config *Config) error {
 			}
 
 			if server.DryRun {
-				log.Printf("[DRY RUN] Would reconcile Kubernetes secret for %s on %s", dbConfig.Database, serverName)
-				if dbConfig.RequiresConnectString {
-					log.Printf("[DRY RUN] Would store connection_string in Kubernetes secret %s for %s on %s", secretNameFor(serverName, dbConfig.Database), dbConfig.Database, serverName)
-				}
+				logDryRunK8sSecret(dbConfig, serverName)
 			} else {
 				var k8sErr error
 				k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				dbConfig, k8sErr = applyK8sPassword(k8sCtx, serverName, server.RootConnectionString, dbConfig)
+				dbConfig, k8sErr = applyK8sPassword(k8sCtx, server.RootConnectionString, dbConfig)
 				k8sCancel()
 				if k8sErr != nil {
 					log.Printf("Failed to reconcile Kubernetes secret for %s on %s: %v", dbConfig.Database, serverName, k8sErr)
@@ -427,6 +422,16 @@ func processConfig(config *Config) error {
 	log.Printf("========================================")
 
 	return nil
+}
+
+func logDryRunK8sSecret(db DatabaseConfig, serverName string) {
+	if db.K8sSecret == "" {
+		return
+	}
+	log.Printf("[DRY RUN] Would reconcile Kubernetes secret %s for %s on %s", db.K8sSecret, db.Database, serverName)
+	if db.RequiresConnectString {
+		log.Printf("[DRY RUN] Would store connection_string in Kubernetes secret %s for %s on %s", db.K8sSecret, db.Database, serverName)
+	}
 }
 
 func connectWithRetry(driverName, connStr string, maxRetries int, delay time.Duration) (*sql.DB, error) {

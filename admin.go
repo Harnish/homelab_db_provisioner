@@ -29,9 +29,9 @@ func backupOrDefault(b *BackupConfig) BackupConfig {
 }
 
 var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
-	"join":            strings.Join,
-	"secretName":      secretNameFor,
-	"backupOrDefault": backupOrDefault,
+	"join":              strings.Join,
+	"defaultSecretName": defaultSecretName,
+	"backupOrDefault":   backupOrDefault,
 	"when": func(rfc3339 string) string {
 		t, err := time.Parse(time.RFC3339, rfc3339)
 		if err != nil {
@@ -176,7 +176,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
   <p class="mode">
     {{if .WatchMode}}<span class="badge ok">Watch mode on</span> Changes saved here reach your databases within about 10 seconds.
     {{else}}<span class="badge warn">Watch mode off</span> Changes are saved to the config file but won't reach your databases until the provisioner runs again.{{end}}
-    {{if .K8sEnabled}}Passwords live in Kubernetes Secrets in namespace <code>{{.Namespace}}</code>.{{end}}
+    {{if .K8sEnabled}}New databases get their password in a Kubernetes Secret in namespace <code>{{.Namespace}}</code>. Move existing ones under Manage.{{end}}
   </p>
   {{if .Flash}}
     <div class="flash {{if .FlashError}}flash-err{{else}}flash-ok{{end}}" role="{{if .FlashError}}alert{{else}}status{{end}}">{{.Flash}}</div>
@@ -252,9 +252,25 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
           </section>
         {{else}}
           <section class="group">
-          {{if $.K8sEnabled}}
+          {{if $db.K8sSecret}}
+            {{$sn := $db.K8sSecret}}
             <h4>Kubernetes Secret</h4>
-            <p><code>{{secretName $server.Name $db.Database}}</code>{{if $db.RequiresConnectString}} <span class="hint">+ connection_string</span>{{end}}</p>
+            <p><code>{{$sn}}</code>{{if $db.RequiresConnectString}} <span class="hint">+ connection_string</span>{{end}}</p>
+            {{if $.K8sEnabled}}
+            <p class="hint">Reference it from your Deployment:</p>
+            <pre>env:
+- name: DB_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{$sn}}
+      key: password{{if $db.RequiresConnectString}}
+- name: DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{$sn}}
+      key: connection_string{{end}}</pre>
+            <p class="hint">Read it:</p>
+            <pre>kubectl get secret {{$sn}} -n {{$.Namespace}} -o jsonpath='{.data.password}' | base64 -d</pre>
             <form method="POST" action="/rotate-secret" onsubmit="return confirm('Rotate the secret for {{$db.Database}}? Apps using the old password will fail until they reload the secret.')">
               <input type="hidden" name="server_index" value="{{$si}}">
               <input type="hidden" name="db_index" value="{{$di}}">
@@ -262,6 +278,9 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
               <input type="hidden" name="database" value="{{$db.Database}}">
               <button type="submit">Rotate secret</button>
             </form>
+            {{else}}
+            <p class="error">USE_KUBERNETES_SECRETS is off, so the provisioner can't read this password and skips this database.</p>
+            {{end}}
           {{else}}
             <h4>Password</h4>
             <div class="row">
@@ -288,6 +307,16 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
               <label>Set to<span class="vh"> new password for {{$db.Database}}</span> <input type="password" name="new_password" autocomplete="new-password" required></label>
               <button type="submit">Save password</button>
             </form>
+            {{if $.K8sEnabled}}
+            <form method="POST" action="/move-to-secret" class="row" onsubmit="return confirm('Move the password for {{$db.Database}} into a Kubernetes Secret? The password stays the same and is removed from the config file.')">
+              <input type="hidden" name="server_index" value="{{$si}}">
+              <input type="hidden" name="db_index" value="{{$di}}">
+              <input type="hidden" name="server" value="{{$server.Name}}">
+              <input type="hidden" name="database" value="{{$db.Database}}">
+              <label>Secret<span class="vh"> name for {{$db.Database}}</span> <input type="text" name="secret_name" value="{{defaultSecretName $db.Database}}" autocomplete="off" spellcheck="false" required></label>
+              <button type="submit">Move to Kubernetes Secret</button>
+            </form>
+            {{end}}
           {{end}}
           </section>
 
@@ -368,18 +397,6 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     <p class="muted">No servers configured yet. Add one with the Add Server form.</p>
   {{end}}
 
-  {{if .K8sEnabled}}
-  <h2>Using a Kubernetes Secret</h2>
-  <p>Each database's password is in its own Secret (name shown under Manage). Read one:</p>
-  <pre>kubectl get secret &lt;secret-name&gt; -n {{.Namespace}} -o jsonpath='{.data.password}' | base64 -d</pre>
-  <p>Or reference it from your Deployment:</p>
-  <pre>env:
-- name: DB_PASSWORD
-  valueFrom:
-    secretKeyRef:
-      name: &lt;secret-name&gt;
-      key: password</pre>
-  {{end}}
   </div>
 
   <div class="col-right">
@@ -397,7 +414,9 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     </label>
     <label>Database name <input type="text" name="database" required></label>
     <label>Username <input type="text" name="user" required></label>
-    <label>Password <input type="password" name="password" autocomplete="new-password" required></label>
+    {{if .K8sEnabled}}<label>Kubernetes Secret name (blank for <code>&lt;database&gt;-credentials</code>) <input type="text" name="secret_name" autocomplete="off" spellcheck="false"></label>
+    <p class="hint">A password is generated into this Secret.</p>
+    {{else}}<label>Password (blank to generate one) <input type="password" name="password" autocomplete="new-password"></label>{{end}}
     <label>Permissions (comma-separated, blank for ALL) <input type="text" name="permissions"></label>
     <label class="check"><input type="checkbox" name="requires_connect_string"> Store full connection_string in Kubernetes secret{{if not .K8sEnabled}} (requires USE_KUBERNETES_SECRETS){{end}}</label>
     <label class="check"><input type="checkbox" name="backup_enabled"> Back up this database</label>
@@ -551,6 +570,7 @@ func newAdminHandler(configPath string) http.Handler {
 	mux.HandleFunc("/generate-password", handleGeneratePassword(configPath))
 	mux.HandleFunc("/reveal-password", handleRevealPassword(configPath))
 	mux.HandleFunc("/rotate-secret", handleRotateSecret(configPath))
+	mux.HandleFunc("/move-to-secret", handleMoveToSecret(configPath))
 	mux.HandleFunc("/update-backup", handleUpdateBackup(configPath))
 	mux.HandleFunc("/add-database", handleAddDatabase(configPath))
 	mux.HandleFunc("/add-server", handleAddServer(configPath))
@@ -671,10 +691,6 @@ func handleRevealPassword(configPath string) http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if secretsManager != nil {
-			http.Error(w, "Passwords live in Kubernetes Secrets in this mode; read them with kubectl", http.StatusBadRequest)
-			return
-		}
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
@@ -716,6 +732,10 @@ func handleRevealPassword(configPath string) http.HandlerFunc {
 		}
 
 		db := cfg.Servers[si].Databases[di]
+		if db.K8sSecret != "" {
+			http.Error(w, "This password lives in a Kubernetes Secret; read it with kubectl", http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		renderIndex(w, configPath, &cfg, "", &revealedPassword{
 			Server:   cfg.Servers[si].Name,
@@ -1124,11 +1144,11 @@ func handleRotateSecret(configPath string) http.HandlerFunc {
 		}
 
 		serverName := cfg.Servers[si].Name
-		dbName := cfg.Servers[si].Databases[di].Database
+		db := cfg.Servers[si].Databases[di]
 
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		if _, err := secretsManager.rotateSecret(ctx, serverName, cfg.Servers[si].RootConnectionString, cfg.Servers[si].Databases[di]); err != nil {
+		if _, err := secretsManager.rotateSecret(ctx, cfg.Servers[si].RootConnectionString, db); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to rotate secret: "+err.Error()), http.StatusSeeOther)
 			return
 		}
@@ -1150,11 +1170,107 @@ func handleRotateSecret(configPath string) http.HandlerFunc {
 		}
 		go func() {
 			if err := processConfig(singleServerConfig); err != nil {
-				log.Printf("k8s-secrets: reprovision after rotate for %s/%s failed: %v", serverName, dbName, err)
+				log.Printf("k8s-secrets: reprovision after rotate for %s/%s failed: %v", serverName, db.Database, err)
 			}
 		}()
 
-		msg := fmt.Sprintf("Rotated Kubernetes secret %s", secretNameFor(serverName, dbName))
+		msg := fmt.Sprintf("Rotated Kubernetes secret %s", db.K8sSecret)
+		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+	}
+}
+
+// handleMoveToSecret moves one database's config password into a Kubernetes
+// Secret (named by the form, default <database>-credentials) without changing
+// it, then drops it from the config file. A leftover Secret this provisioner
+// created earlier is adopted as-is.
+func handleMoveToSecret(configPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if secretsManager == nil {
+			http.Error(w, "Kubernetes secrets mode is not enabled", http.StatusBadRequest)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		si, err := strconv.Atoi(r.FormValue("server_index"))
+		if err != nil {
+			http.Error(w, "Invalid server_index", http.StatusBadRequest)
+			return
+		}
+		di, err := strconv.Atoi(r.FormValue("db_index"))
+		if err != nil {
+			http.Error(w, "Invalid db_index", http.StatusBadRequest)
+			return
+		}
+
+		configMu.Lock()
+		defer configMu.Unlock()
+
+		fileData, err := os.ReadFile(configPath)
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to read config"), http.StatusSeeOther)
+			return
+		}
+		var cfg Config
+		if err := json.Unmarshal(fileData, &cfg); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to parse config"), http.StatusSeeOther)
+			return
+		}
+		if si < 0 || si >= len(cfg.Servers) {
+			http.Error(w, "server_index out of range", http.StatusBadRequest)
+			return
+		}
+		if di < 0 || di >= len(cfg.Servers[si].Databases) {
+			http.Error(w, "db_index out of range", http.StatusBadRequest)
+			return
+		}
+		if staleRow(r, &cfg, si, di) {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape(staleRowMsg), http.StatusSeeOther)
+			return
+		}
+
+		server := cfg.Servers[si]
+		db := &cfg.Servers[si].Databases[di]
+		if db.K8sSecret != "" {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape(db.Database+" is already in Kubernetes Secret "+db.K8sSecret), http.StatusSeeOther)
+			return
+		}
+		name, err := claimSecretName(&cfg, r.FormValue("secret_name"), db.Database)
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: "+err.Error()), http.StatusSeeOther)
+			return
+		}
+
+		// Secret first, config second: if the config write fails, the Secret
+		// holds the same password the database already has, so nothing breaks.
+		db.K8sSecret = name
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		livePassword, err := secretsManager.reconcilePassword(ctx, server.RootConnectionString, *db)
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to create secret: "+err.Error()), http.StatusSeeOther)
+			return
+		}
+		msg := fmt.Sprintf("Moved the password for %s into Kubernetes Secret %s", db.Database, name)
+		if db.Password != "" && livePassword != db.Password {
+			msg = fmt.Sprintf("Kubernetes Secret %s already existed and is now used for %s; its password replaces the one from the config file", name, db.Database)
+		}
+		db.Password = ""
+
+		out, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
+			return
+		}
+		if err := os.WriteFile(configPath, out, 0600); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape(writeConfigErrMsg(err)), http.StatusSeeOther)
+			return
+		}
 		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 	}
 }
@@ -1214,12 +1330,30 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 			}
 		}
 
+		msg := "Database added"
 		newDB := DatabaseConfig{
 			Database:              database,
 			User:                  user,
 			Password:              r.FormValue("password"),
 			Permissions:           permissions,
 			RequiresConnectString: r.FormValue("requires_connect_string") == "on",
+		}
+		if secretsManager != nil {
+			// New databases start out in a Secret; the provisioner generates
+			// the password on its first pass.
+			name, err := claimSecretName(&cfg, r.FormValue("secret_name"), database)
+			if err != nil {
+				http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: "+err.Error()), http.StatusSeeOther)
+				return
+			}
+			newDB.K8sSecret = name
+			newDB.Password = ""
+		} else if newDB.Password == "" {
+			if newDB.Password, err = generatePassword(); err != nil {
+				http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to generate password"), http.StatusSeeOther)
+				return
+			}
+			msg = "Database added with a generated password. Use Show under Manage to view it."
 		}
 		if backup := parseBackupFields(r); backup.Enabled || backup.RestoreOnCreate || backup.KeepCount != 0 {
 			newDB.Backup = &backup
@@ -1235,7 +1369,7 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape(writeConfigErrMsg(err)), http.StatusSeeOther)
 			return
 		}
-		http.Redirect(w, r, "/?msg="+url.QueryEscape("Database added"), http.StatusSeeOther)
+		http.Redirect(w, r, "/?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 	}
 }
 

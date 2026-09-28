@@ -44,6 +44,7 @@ type databaseResponse struct {
 	Permissions []string      `json:"permissions,omitempty"`
 	Extensions  []string      `json:"extensions,omitempty"`
 	Backup      *BackupConfig `json:"backup,omitempty"`
+	K8sSecret   string        `json:"k8s_secret,omitempty"`
 }
 
 func toDatabaseResponse(di int, d DatabaseConfig) databaseResponse {
@@ -54,6 +55,7 @@ func toDatabaseResponse(di int, d DatabaseConfig) databaseResponse {
 		Permissions: d.Permissions,
 		Extensions:  d.Extensions,
 		Backup:      d.Backup,
+		K8sSecret:   d.K8sSecret,
 	}
 }
 
@@ -305,6 +307,7 @@ type createDatabaseRequest struct {
 	Permissions []string      `json:"permissions"`
 	Extensions  []string      `json:"extensions"`
 	Backup      *BackupConfig `json:"backup"`
+	SecretName  string        `json:"secret_name"` // Kubernetes Secret mode only; blank for <database>-credentials
 }
 
 func handleAPICreateDatabase(configPath string) http.HandlerFunc {
@@ -319,9 +322,25 @@ func handleAPICreateDatabase(configPath string) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
-		if req.Database == "" || req.User == "" || req.Password == "" {
-			writeJSONError(w, http.StatusBadRequest, "database, user, and password are required")
+		if req.Database == "" || req.User == "" {
+			writeJSONError(w, http.StatusBadRequest, "database and user are required")
 			return
+		}
+		// In Kubernetes Secret mode new databases get a generated password in
+		// a Secret, so there is nothing to supply; otherwise it's required.
+		if secretsManager != nil && req.Password != "" {
+			writeJSONError(w, http.StatusBadRequest, "omit password: new databases get a generated password in a Kubernetes Secret")
+			return
+		}
+		// Blank password outside k8s mode: generate one and return it once in
+		// the create response, since GET never returns passwords.
+		var generated string
+		if secretsManager == nil && req.Password == "" {
+			if generated, err = generatePassword(); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "failed to generate password")
+				return
+			}
+			req.Password = generated
 		}
 
 		configMu.Lock()
@@ -345,6 +364,12 @@ func handleAPICreateDatabase(configPath string) http.HandlerFunc {
 			Extensions:  req.Extensions,
 			Backup:      req.Backup,
 		}
+		if secretsManager != nil {
+			if newDB.K8sSecret, err = claimSecretName(cfg, req.SecretName, req.Database); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		cfg.Servers[si].Databases = append(cfg.Servers[si].Databases, newDB)
 		di := len(cfg.Servers[si].Databases) - 1
 
@@ -352,7 +377,10 @@ func handleAPICreateDatabase(configPath string) http.HandlerFunc {
 			writeJSONError(w, http.StatusInternalServerError, "failed to write config: "+err.Error())
 			return
 		}
-		writeJSON(w, http.StatusCreated, toDatabaseResponse(di, newDB))
+		writeJSON(w, http.StatusCreated, struct {
+			databaseResponse
+			GeneratedPassword string `json:"generated_password,omitempty"`
+		}{toDatabaseResponse(di, newDB), generated})
 	}
 }
 
