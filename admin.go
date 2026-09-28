@@ -124,6 +124,12 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
 
     .db-cols, .db > summary { display: grid; grid-template-columns: var(--cols); gap: var(--s3); padding: var(--s2) var(--s3); }
     .db-cols { font-size: 0.75rem; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line-strong); }
+    .db-cols button { all: unset; cursor: pointer; }
+    .db-cols button:hover { color: var(--fg); }
+    .db-cols button:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
+    .db-cols button[data-dir=asc]::after { content: " \2191"; }
+    .db-cols button[data-dir=desc]::after { content: " \2193"; }
+    .db-filter { margin-bottom: var(--s2); }
     .db { border-bottom: 1px solid var(--line); }
     .db > summary { cursor: pointer; list-style: none; align-items: baseline; min-height: 2.75rem; overflow-wrap: anywhere; }
     .db > summary::-webkit-details-marker { display: none; }
@@ -147,8 +153,8 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     label.check { align-items: flex-start; }
     label.check input { margin-top: 0.15em; flex: none; }
     label.check { margin-bottom: var(--s2); }
-    input[type=text], input[type=password], input[type=number], select { font: inherit; min-height: 2rem; padding: 0 var(--s2); border: 1px solid var(--line-strong); border-radius: 4px; background: var(--control); color: var(--fg); }
-    input[type=text], input[type=password], select { width: 100%; max-width: 300px; }
+    input[type=text], input[type=search], input[type=password], input[type=number], select { font: inherit; min-height: 2rem; padding: 0 var(--s2); border: 1px solid var(--line-strong); border-radius: 4px; background: var(--control); color: var(--fg); }
+    input[type=text], input[type=search], input[type=password], select { width: 100%; max-width: 300px; }
     .row select { width: auto; }
     .row input[type=password] { width: 12rem; }
     input[type=number] { width: 5rem; }
@@ -207,7 +213,9 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
       {{with $health.Items}}<p class="attention {{if $health.Warn}}warn{{end}}">{{join . " · "}}</p>
       {{else}}<p class="attention ok">{{if eq (len $server.Databases) 1}}Database{{else}}All {{len $server.Databases}} databases{{end}} OK</p>{{end}}
 
-      <div class="db-cols" aria-hidden="true"><span>Database</span><span>User</span><span>Access</span><span>Backup</span><span>Migration</span><span></span></div>
+      <input type="search" class="db-filter" placeholder="Filter databases" aria-label="Filter databases on {{$server.Name}}">
+      <div class="db-cols"><button type="button">Database</button><button type="button">User</button><button type="button">Access</button><button type="button">Backup</button><button type="button">Migration</button><span></span></div>
+      <div class="db-list">
       {{range $di, $db := $server.Databases}}
       {{$h := index $health.DBs $di}}
       {{$b := backupOrDefault $db.Backup}}
@@ -391,6 +399,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
         </div>
       </details>
       {{end}}
+      </div>
       {{end}}
     </section>
   {{else}}
@@ -443,6 +452,34 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
   </div>
   </div>
   </main>
+  <script>
+    // Client-side sort (header click) and filter for each server's database list.
+    document.querySelectorAll('.server').forEach(function (s) {
+      var list = s.querySelector('.db-list');
+      if (!list) return;
+      var cell = function (d, i) { return d.querySelector('summary').children[i].textContent.replace(/\s+/g, ' ').trim(); };
+      s.querySelector('.db-filter').addEventListener('input', function (e) {
+        var q = e.target.value.trim().toLowerCase();
+        Array.from(list.children).forEach(function (d) {
+          d.hidden = q !== '' && !d.querySelector('summary').textContent.toLowerCase().includes(q);
+        });
+      });
+      var btns = s.querySelectorAll('.db-cols button');
+      btns.forEach(function (b, i) {
+        b.addEventListener('click', function () {
+          var dir = b.dataset.dir === 'asc' ? 'desc' : 'asc';
+          btns.forEach(function (o) { delete o.dataset.dir; });
+          b.dataset.dir = dir;
+          Array.from(list.children)
+            .sort(function (x, y) {
+              var c = cell(x, i).localeCompare(cell(y, i), undefined, { numeric: true, sensitivity: 'base' });
+              return dir === 'asc' ? c : -c;
+            })
+            .forEach(function (d) { list.appendChild(d); });
+        });
+      });
+    });
+  </script>
 </body>
 </html>`))
 
