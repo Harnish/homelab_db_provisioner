@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestAPIListServers_RequiresAuth(t *testing.T) {
@@ -349,6 +351,68 @@ func TestAPICreateDatabase_MissingFields(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAPICreateDatabase_BlankPasswordIsGenerated(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	req := httptest.NewRequest("POST", "/api/servers/0/databases", strings.NewReader(`{"database":"newdb","user":"newuser"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", w.Code, w.Body.String())
+	}
+	var got struct {
+		GeneratedPassword string `json:"generated_password"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &got)
+	var cfg Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &cfg)
+	saved := cfg.Servers[0].Databases[1].Password
+	if len(saved) != 20 || got.GeneratedPassword != saved {
+		t.Fatalf("expected generated password saved and returned once; saved %q, returned %q", saved, got.GeneratedPassword)
+	}
+}
+
+func TestAPICreateDatabase_K8sModeStartsInSecret(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	path := makeTestConfig(t, testConfigJSON)
+	h := newAdminHandler(path)
+
+	secretsManager = &k8sSecretsManager{client: fake.NewSimpleClientset(), namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	post := func(body string) int {
+		req := httptest.NewRequest("POST", "/api/servers/0/databases", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.SetBasicAuth("admin", "secret")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w.Code
+	}
+	if code := post(`{"database":"x","user":"x","password":"p"}`); code != http.StatusBadRequest {
+		t.Fatalf("password in k8s mode: expected 400, got %d", code)
+	}
+	if code := post(`{"database":"newdb","user":"newuser","secret_name":"newdb-creds"}`); code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", code)
+	}
+	if code := post(`{"database":"other","user":"other","secret_name":"newdb-creds"}`); code != http.StatusBadRequest {
+		t.Fatalf("secret name already in use: expected 400, got %d", code)
+	}
+	var cfg Config
+	data, _ := os.ReadFile(path)
+	json.Unmarshal(data, &cfg)
+	if added := cfg.Servers[0].Databases[1]; added.K8sSecret != "newdb-creds" || added.Password != "" {
+		t.Errorf("expected new database in Secret newdb-creds, got %+v", added)
 	}
 }
 

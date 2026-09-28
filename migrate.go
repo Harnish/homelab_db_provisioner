@@ -93,6 +93,16 @@ func runMigration(config *Config, serverIdx int, source DatabaseServer, dbIdx in
 	}
 	log.Printf("migrate: %s/%s -> %s starting", source.Name, db.Database, target.Name)
 
+	// The role on the target gets the live password, which may be in a
+	// Kubernetes Secret rather than the config file.
+	k8sCtx, k8sCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	db, err = applyK8sPassword(k8sCtx, source.RootConnectionString, db)
+	k8sCancel()
+	if err != nil {
+		fail("read password from Kubernetes Secret: %v", err)
+		return
+	}
+
 	// Prepare target.
 	targetRoot, err := sql.Open("postgres", target.RootConnectionString)
 	if err != nil {
