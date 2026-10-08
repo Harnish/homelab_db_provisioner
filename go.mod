@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.4
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/lib/pq v1.12.3
 	go.mongodb.org/mongo-driver v1.17.10
