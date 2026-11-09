@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -170,6 +171,11 @@ func (m *k8sSecretsManager) reconcilePassword(ctx context.Context, rootConnStr s
 // Databases without it keep their config password and never touch Kubernetes.
 func applyK8sPassword(ctx context.Context, rootConnStr string, db DatabaseConfig) (DatabaseConfig, error) {
 	if db.K8sSecret == "" {
+		if db.MirrorSecret != "" && secretsManager != nil {
+			if err := secretsManager.mirrorPassword(ctx, rootConnStr, db); err != nil {
+				return db, err
+			}
+		}
 		return db, nil
 	}
 	if secretsManager == nil {
@@ -184,6 +190,53 @@ func applyK8sPassword(ctx context.Context, rootConnStr string, db DatabaseConfig
 	}
 	db.Password = password
 	return db, nil
+}
+
+// mirrorPassword publishes db's config password to db.MirrorSecret. The config
+// stays the source of truth, so the Secret is rewritten whenever it drifts.
+// Used while migrating apps onto Secrets; set k8s_secret later to cut over.
+func (m *k8sSecretsManager) mirrorPassword(ctx context.Context, rootConnStr string, db DatabaseConfig) error {
+	if db.Password == "" {
+		return fmt.Errorf("mirror_secret %s: %s has no config password to mirror", db.MirrorSecret, db.Database)
+	}
+	db.K8sSecret = db.MirrorSecret // secretData error text only
+	data, err := secretData(rootConnStr, db, db.Password)
+	if err != nil {
+		return err
+	}
+	secret, err := m.managedSecret(ctx, db.MirrorSecret)
+	if err != nil {
+		return err
+	}
+	if secret == nil {
+		if err := m.createSecret(ctx, db.MirrorSecret, data); err != nil {
+			return err
+		}
+		log.Printf("k8s-secrets: created mirror secret %s", db.MirrorSecret)
+		return nil
+	}
+	same := true
+	for k, v := range data {
+		if !bytes.Equal(secret.Data[k], v) {
+			same = false
+		}
+	}
+	if same {
+		return nil
+	}
+	secret = secret.DeepCopy()
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+	for k, v := range data {
+		secret.Data[k] = v
+		delete(secret.StringData, k)
+	}
+	if _, err := m.client.CoreV1().Secrets(m.namespace).Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update mirror secret %s: %w", db.MirrorSecret, err)
+	}
+	log.Printf("k8s-secrets: updated mirror secret %s", db.MirrorSecret)
+	return nil
 }
 
 func (m *k8sSecretsManager) rotateSecret(ctx context.Context, rootConnStr string, db DatabaseConfig) (string, error) {

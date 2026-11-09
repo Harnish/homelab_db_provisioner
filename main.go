@@ -49,7 +49,8 @@ type DatabaseConfig struct {
 	Extensions            []string       `json:"extensions,omitempty"`
 	Backup                *BackupConfig  `json:"backup,omitempty"`
 	RequiresConnectString bool           `json:"requires_connect_string,omitempty"`
-	K8sSecret             string         `json:"k8s_secret,omitempty"` // name of the Kubernetes Secret holding the password; empty means Password is used
+	K8sSecret             string         `json:"k8s_secret,omitempty"`    // name of the Kubernetes Secret holding the password; empty means Password is used
+	MirrorSecret          string         `json:"mirror_secret,omitempty"` // transition aid: publish the config password to this Secret without making the Secret the source of truth
 	Migrate               *MigrateConfig `json:"migrate,omitempty"`
 }
 
@@ -425,6 +426,9 @@ func processConfig(config *Config) error {
 }
 
 func logDryRunK8sSecret(db DatabaseConfig, serverName string) {
+	if db.MirrorSecret != "" && db.K8sSecret == "" {
+		log.Printf("[DRY RUN] Would mirror config password into Kubernetes secret %s for %s on %s", db.MirrorSecret, db.Database, serverName)
+	}
 	if db.K8sSecret == "" {
 		return
 	}

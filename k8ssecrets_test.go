@@ -415,3 +415,32 @@ func TestReadNamespaceFile_EmptyFile(t *testing.T) {
 		t.Fatal("expected error for empty/whitespace-only namespace file")
 	}
 }
+
+func TestApplyK8sPassword_MirrorCreatesThenSyncsDrift(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	secretsManager = &k8sSecretsManager{client: client, namespace: "default"}
+	defer func() { secretsManager = nil }()
+
+	db := DatabaseConfig{Database: "app_db", Password: "pw1", MirrorSecret: "app-mirror"}
+	got, err := applyK8sPassword(context.Background(), testRootConn, db)
+	if err != nil || got.Password != "pw1" {
+		t.Fatalf("got %q, err %v; config password must stay source of truth", got.Password, err)
+	}
+	read := func() string {
+		s, err := client.CoreV1().Secrets("default").Get(context.Background(), "app-mirror", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(s.Data["password"])
+	}
+	if read() != "pw1" {
+		t.Fatalf("mirror password = %q, want pw1", read())
+	}
+	db.Password = "pw2"
+	if _, err := applyK8sPassword(context.Background(), testRootConn, db); err != nil {
+		t.Fatal(err)
+	}
+	if read() != "pw2" {
+		t.Fatalf("mirror password = %q, want pw2 after config change", read())
+	}
+}

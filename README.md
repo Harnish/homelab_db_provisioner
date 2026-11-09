@@ -111,6 +111,7 @@ Create a `config.json` file with your database server configurations. You can ma
     - `user`: Username to create/manage
     - `password`: Password for the user
     - `requires_connect_string`: `true` to also store a full connection string (e.g. `postgres://user:pass@host:port/db`) under the `connection_string` key of the managed Kubernetes Secret. Only takes effect when `USE_KUBERNETES_SECRETS=true` — see [Kubernetes Secrets Mode](#kubernetes-secrets-mode).
+    - `mirror_secret`: Transition aid. Name of a Kubernetes Secret to fill with the current config `password` (plus `connection_string` if `requires_connect_string`). The config stays the source of truth and the Secret is rewritten if it drifts, so you can point an app at the Secret and test it before cutting over (cutover = remove `password`, set `k8s_secret`, or use "Move to Secret" in the admin UI). Needs `USE_KUBERNETES_SECRETS=true`; ignored when `k8s_secret` is set.
     - `extensions`: Optional list of PostgreSQL extensions to install in the database (e.g. `["uuid-ossp", "pgcrypto"]`). Each extension is created with `CREATE EXTENSION IF NOT EXISTS`. Not supported for MariaDB.
     - `backup`: Optional backup configuration (see [Backups](#backups))
       - `enabled`: `true` to enable scheduled backups
