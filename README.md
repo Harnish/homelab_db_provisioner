@@ -168,13 +168,13 @@ This will:
 1. Build the image:
 
 ```bash
-docker build -t pg-provisioner .
+docker build -t homelab-db-provisioner .
 ```
 
 2. Run the container (assuming PostgreSQL is accessible):
 
 ```bash
-docker run -v $(pwd)/config.json:/config/config.json:ro pg-provisioner
+docker run -v $(pwd)/config.json:/config/config.json:ro homelab-db-provisioner
 ```
 
 ### Using Kubernetes with ConfigMaps
@@ -191,7 +191,7 @@ kubectl apply -f kubernetes-deployment.yaml
 
 When you update the ConfigMap:
 ```bash
-kubectl edit configmap pg-provisioner-config
+kubectl edit configmap homelab-db-provisioner-config
 ```
 
 The pod will automatically detect changes within ~10 seconds and reprocess the configuration.
@@ -237,7 +237,7 @@ The container will detect changes within 10 seconds.
 #### Kubernetes
 Update the ConfigMap:
 ```bash
-kubectl edit configmap pg-provisioner-config
+kubectl edit configmap homelab-db-provisioner-config
 # or
 kubectl apply -f updated-config.yaml
 ```
@@ -367,7 +367,7 @@ docker run \
   -e WATCH_MODE=true \
   -p 8080:8080 \
   -v $(pwd)/config.json:/config/config.json \
-  pg-provisioner
+  homelab-db-provisioner
 ```
 
 Then open `http://localhost:8080` in your browser. You will be prompted for the username and password you set above.
@@ -664,7 +664,7 @@ docker run \
   -e WATCH_MODE=true \
   -v $(pwd)/config.json:/config/config.json \
   -v $(pwd)/backups:/config/backups \
-  pg-provisioner
+  homelab-db-provisioner
 ```
 
 ### Kubernetes: Persisting Backups
