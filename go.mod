@@ -1,4 +1,4 @@
-module github.com/yourusername/homelab-db-provisioner
+module github.com/Harnish/homelab_db_provisioner
 
 go 1.26.0
 
