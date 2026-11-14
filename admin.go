@@ -100,10 +100,10 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     h4 { font-size: 0.875rem; margin: 0 0 var(--s2); }
     p { margin: 0 0 var(--s2); }
     code, .mono { font-family: var(--mono); font-size: 0.875em; }
-    pre { font-family: var(--mono); font-size: 0.8125rem; background: var(--panel); padding: var(--s3); border-radius: 4px; overflow-x: auto; }
+    pre { font-family: var(--mono); font-size: 0.8125rem; background: var(--control); border: 1px solid var(--line); padding: var(--s3); border-radius: 4px; overflow-x: auto; }
     .muted { color: var(--muted); }
     .hint { font-size: 0.8125rem; color: var(--muted); }
-    .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    .vh, .lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
     .mode { color: var(--muted); margin-bottom: var(--s6); }
     .badge { display: inline-block; font-size: 0.8125rem; line-height: 1.5; padding: 0 var(--s2); border-radius: 0.75em; background: var(--panel); color: var(--muted); }
@@ -144,10 +144,10 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     .db > summary:focus-visible, .sub > summary:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; }
     .sub-line { display: block; font-size: 0.8125rem; color: var(--muted); }
     .sub-line.warn { color: var(--warn); }
-    .lbl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
     .manage { justify-self: end; font-size: 0.875rem; color: var(--info); white-space: nowrap; }
     .manage::after { content: ""; display: inline-block; width: 0.4em; height: 0.4em; margin-left: 0.4em; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: translateY(-0.2em) rotate(45deg); transition: transform 0.15s ease-out; }
     .db[open] .manage::after { transform: translateY(0.05em) rotate(-135deg); }
+    @media (prefers-reduced-motion: reduce) { .manage::after { transition: none; } }
 
     .panel { background: var(--panel); padding: var(--s2) var(--s3) var(--s6); display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: var(--s4) var(--s8); }
     .group > form, .group > .row { margin-bottom: var(--s3); }
