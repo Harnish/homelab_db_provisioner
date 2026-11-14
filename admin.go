@@ -63,6 +63,9 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
       --warn: #7a4b00; --warn-bg: #fdf1d8;
       --err: #9b1c1c; --err-bg: #fbe4e4; --err-line: #c46262;
       --info: #0b4f8a; --info-bg: #e5f0fb; --info-line: #9ec5fe;
+      /* Action color: filled primary buttons, caret. Same blue family as links and focus. */
+      --accent: #0b4f8a; --accent-hover: #083d6c; --on-accent: #fff;
+      --sel: #a8cdf5;
       --s1: 0.25rem; --s2: 0.5rem; --s3: 0.75rem; --s4: 1rem; --s6: 1.5rem; --s8: 2rem;
       color-scheme: light dark;
       --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -81,11 +84,15 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
         --warn: #f0bd5c; --warn-bg: #3a2c0e;
         --err: #f49a9a; --err-bg: #3e1d1d; --err-line: #b35f5f;
         --info: #84bdf5; --info-bg: #14304c; --info-line: #3b6c9c;
+        --accent: #84bdf5; --accent-hover: #a3cdf8; --on-accent: #0d1b2a;
+        --sel: #2f5f93;
       }
     }
     * { box-sizing: border-box; }
     body { font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); max-width: 1280px; margin: var(--s8) auto; padding: 0 var(--s4); }
-    ::selection { background: var(--info-bg); color: var(--fg); }
+    ::selection { background: var(--sel); color: var(--fg); }
+    input, select { caret-color: var(--accent); }
+    pre { scrollbar-color: var(--line-strong) transparent; }
     h1 { font-size: 1.5rem; margin: 0 0 var(--s2); }
     h2 { font-size: 1.15rem; margin: 0 0 var(--s4); }
     h2:not(:first-child) { margin-top: var(--s8); }
@@ -125,7 +132,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     .db-cols, .db > summary { display: grid; grid-template-columns: var(--cols); gap: var(--s3); padding: var(--s2) var(--s3); }
     .db-cols { font-size: 0.75rem; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line-strong); }
     .db-cols button { all: unset; cursor: pointer; }
-    .db-cols button:hover { color: var(--fg); }
+    .db-cols button:hover, .db-cols button[data-dir] { color: var(--fg); }
     .db-cols button:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
     .db-cols button[data-dir=asc]::after { content: " \2191"; }
     .db-cols button[data-dir=desc]::after { content: " \2193"; }
@@ -162,6 +169,8 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
     button { font: inherit; font-size: 0.875rem; min-height: 2rem; padding: 0 var(--s3); border: 1px solid var(--line-strong); border-radius: 4px; background: var(--control); color: var(--fg); cursor: pointer; }
     button:hover { background: var(--hover); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+    button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
     button.danger { color: var(--err); border-color: var(--err-line); }
     button.danger:hover { background: var(--err-bg); }
 
@@ -438,7 +447,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     </div>
     <p class="hint" id="add-keep-hint">Keep 0 keeps every backup.</p>
     <label class="check"><input type="checkbox" name="backup_restore_on_create"> Restore the newest backup when the database is created</label>
-    <button type="submit">Add Database</button>
+    <button type="submit" class="primary">Add Database</button>
   </form>
   {{end}}
 
@@ -447,7 +456,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     <label>Name <input type="text" name="name" required></label>
     <label>Root connection string <input type="text" name="root_connection_string" placeholder="postgres://user:pass@host:5432/postgres" autocomplete="off" spellcheck="false" required></label>
     <label class="check"><input type="checkbox" name="dry_run"> Dry run (log SQL, don't execute it)</label>
-    <button type="submit">Add Server</button>
+    <button type="submit" class="primary">Add Server</button>
   </form>
   </div>
   </div>
