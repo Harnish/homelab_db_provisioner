@@ -170,6 +170,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     input:focus-visible, select:focus-visible, button:focus-visible, pre:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
     button { font: inherit; font-size: 0.875rem; min-height: 2rem; padding: 0 var(--s3); border: 1px solid var(--line-strong); border-radius: 4px; background: var(--control); color: var(--fg); cursor: pointer; }
     button:hover { background: var(--hover); }
+    button:disabled { color: var(--muted); background: var(--panel); border-color: var(--line); cursor: not-allowed; }
     button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
     button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
     button.danger { color: var(--err); border-color: var(--err-line); }
@@ -265,6 +266,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
               <input type="hidden" name="server" value="{{$server.Name}}">
               <input type="hidden" name="database" value="{{$db.Database}}">
               <input type="hidden" name="target_server" value="">
+              <noscript><label class="check"><input type="checkbox" required> The provisioner will manage {{$db.Database}} on {{$server.Name}} again{{if $db.Migrate.ConfirmDrop}} and recreate it there empty{{end}}.</label></noscript>
               <button type="submit">Clear migration record</button>
             </form>
           </section>
@@ -294,6 +296,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
               <input type="hidden" name="db_index" value="{{$di}}">
               <input type="hidden" name="server" value="{{$server.Name}}">
               <input type="hidden" name="database" value="{{$db.Database}}">
+              <noscript><label class="check"><input type="checkbox" required> Apps using the old password will fail until they reload the secret.</label></noscript>
               <button type="submit">Rotate secret</button>
             </form>
             {{else}}
@@ -314,6 +317,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
                 <input type="hidden" name="db_index" value="{{$di}}">
                 <input type="hidden" name="server" value="{{$server.Name}}">
                 <input type="hidden" name="database" value="{{$db.Database}}">
+                <noscript><label class="check"><input type="checkbox" required> Apps using the old password will fail until updated.</label></noscript>
                 <button type="submit">Generate new</button>
               </form>
             </div>
@@ -323,6 +327,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
               <input type="hidden" name="server" value="{{$server.Name}}">
               <input type="hidden" name="database" value="{{$db.Database}}">
               <label>Set to<span class="vh"> new password for {{$db.Database}}</span> <input type="password" name="new_password" autocomplete="new-password" required></label>
+              <noscript><label class="check"><input type="checkbox" required> Apps using the old password will fail until updated.</label></noscript>
               <button type="submit">Save password</button>
             </form>
             {{if $.K8sEnabled}}
@@ -332,6 +337,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
               <input type="hidden" name="server" value="{{$server.Name}}">
               <input type="hidden" name="database" value="{{$db.Database}}">
               <label>Secret<span class="vh"> name for {{$db.Database}}</span> <input type="text" name="secret_name" value="{{defaultSecretName $db.Database}}" autocomplete="off" spellcheck="false" required></label>
+              <noscript><label class="check"><input type="checkbox" required> The password stays the same and is removed from the config file.</label></noscript>
               <button type="submit">Move to Kubernetes Secret</button>
             </form>
             {{end}}
