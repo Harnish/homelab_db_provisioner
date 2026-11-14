@@ -487,11 +487,20 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
         });
       });
       var btns = s.querySelectorAll('.db-cols button');
+      // The header buttons sort; say so, and name the current direction. The visible word stays first in the label.
+      var name = function (b) {
+        var t = 'Sort by ' + b.dataset.name.toLowerCase();
+        if (b.dataset.dir) t += ', ' + (b.dataset.dir === 'asc' ? 'ascending' : 'descending');
+        b.title = t;
+        b.setAttribute('aria-label', t);
+      };
+      btns.forEach(function (b) { b.dataset.name = b.textContent.trim(); name(b); });
       btns.forEach(function (b, i) {
         b.addEventListener('click', function () {
           var dir = b.dataset.dir === 'asc' ? 'desc' : 'asc';
           btns.forEach(function (o) { delete o.dataset.dir; });
           b.dataset.dir = dir;
+          btns.forEach(name);
           Array.from(list.children)
             .sort(function (x, y) {
               var c = cell(x, i).localeCompare(cell(y, i), undefined, { numeric: true, sensitivity: 'base' });
