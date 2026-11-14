@@ -112,7 +112,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     .badge.err { background: var(--err-bg); color: var(--err); }
     .badge.info { background: var(--info-bg); color: var(--info); }
 
-    .flash, .reveal { padding: var(--s3) var(--s4); border-radius: 4px; margin-bottom: var(--s4); }
+    .flash, .reveal { padding: var(--s3) var(--s4); border-radius: 4px; margin-bottom: var(--s4); overflow-wrap: anywhere; }
     .flash-ok { background: var(--ok-bg); color: var(--ok); }
     .flash-err { background: var(--err-bg); color: var(--err); }
     .reveal { background: var(--info-bg); color: var(--info); }
@@ -125,6 +125,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
 
     .server { margin-bottom: var(--s8); }
     .server-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2); }
+    .server-head h3 { min-width: 0; overflow-wrap: anywhere; }
     .attention { font-size: 0.875rem; margin: var(--s1) 0 var(--s3); color: var(--muted); }
     .attention.ok { color: var(--ok); }
     .attention.warn { color: var(--warn); font-weight: 600; }
@@ -166,7 +167,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     .row input[type=password] { width: 12rem; }
     input[type=number] { width: 5rem; }
     input[type=checkbox] { width: 1.1rem; height: 1.1rem; margin: 0; accent-color: var(--info); }
-    input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
+    input:focus-visible, select:focus-visible, button:focus-visible, pre:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
     button { font: inherit; font-size: 0.875rem; min-height: 2rem; padding: 0 var(--s3); border: 1px solid var(--line-strong); border-radius: 4px; background: var(--control); color: var(--fg); cursor: pointer; }
     button:hover { background: var(--hover); }
     button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
@@ -275,7 +276,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
             <p><code>{{$sn}}</code>{{if $db.RequiresConnectString}} <span class="hint">+ connection_string</span>{{end}}</p>
             {{if $.K8sEnabled}}
             <p class="hint">Reference it from your Deployment:</p>
-            <pre>env:
+            <pre tabindex="0">env:
 - name: DB_PASSWORD
   valueFrom:
     secretKeyRef:
@@ -287,7 +288,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
       name: {{$sn}}
       key: connection_string{{end}}</pre>
             <p class="hint">Read it:</p>
-            <pre>kubectl get secret {{$sn}} -n {{$.Namespace}} -o jsonpath='{.data.password}' | base64 -d</pre>
+            <pre tabindex="0">kubectl get secret {{$sn}} -n {{$.Namespace}} -o jsonpath='{.data.password}' | base64 -d</pre>
             <form method="POST" action="/rotate-secret" onsubmit="return confirm('Rotate the secret for {{$db.Database}}? Apps using the old password will fail until they reload the secret.')">
               <input type="hidden" name="server_index" value="{{$si}}">
               <input type="hidden" name="db_index" value="{{$di}}">
@@ -466,11 +467,17 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     document.querySelectorAll('.server').forEach(function (s) {
       var list = s.querySelector('.db-list');
       if (!list) return;
-      var cell = function (d, i) { return d.querySelector('summary').children[i].textContent.replace(/\s+/g, ' ').trim(); };
+      // Visible text of summary cell i, without the visually hidden column labels ("User", "Backup"...).
+      var cell = function (d, i) {
+        var c = d.querySelector('summary').children[i].cloneNode(true);
+        c.querySelectorAll('.lbl, .vh').forEach(function (n) { n.remove(); });
+        return c.textContent.replace(/\s+/g, ' ').trim();
+      };
       s.querySelector('.db-filter').addEventListener('input', function (e) {
         var q = e.target.value.trim().toLowerCase();
         Array.from(list.children).forEach(function (d) {
-          d.hidden = q !== '' && !d.querySelector('summary').textContent.toLowerCase().includes(q);
+          var hay = [0, 1, 2, 3, 4].map(function (i) { return cell(d, i); }).join(' ').toLowerCase();
+          d.hidden = q !== '' && !hay.includes(q);
         });
       });
       var btns = s.querySelectorAll('.db-cols button');
@@ -487,6 +494,17 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
             .forEach(function (d) { list.appendChild(d); });
         });
       });
+    });
+    // Block double submits (a second Generate or Rotate would change the password twice).
+    // Runs after the inline confirm() handlers, so a cancelled confirm leaves the button alone.
+    document.addEventListener('submit', function (e) {
+      if (e.defaultPrevented) return;
+      var b = e.target.querySelector('button[type=submit]');
+      if (b) setTimeout(function () { b.disabled = true; }, 0);
+    });
+    // Back/forward cache restores the page with those buttons still disabled.
+    window.addEventListener('pageshow', function (e) {
+      if (e.persisted) document.querySelectorAll('button[type=submit]:disabled').forEach(function (b) { b.disabled = false; });
     });
   </script>
 </body>
