@@ -1,0 +1,17 @@
+.git
+.github
+.claude
+.impeccable
+.worktrees
+.superpowers
+docs
+graft
+systemd
+packaging
+*.md
+*.yaml
+*.yml
+*.json
+/provisioner
+/homelab-db-provisioner
+/homelab_db_provisioner

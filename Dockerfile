@@ -14,12 +14,14 @@ RUN go mod download
 COPY *.go ./
 
 # Build the application with static linking
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a -ldflags '-extldflags "-static"' -o provisioner .
+ARG TARGETARCH
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a -ldflags "-X main.version=${VERSION} -extldflags \"-static\"" -o provisioner .
 
-# Final stage - alpine provides pg_dump and mysqldump for backups
+# Final stage - alpine provides pg_dump, mysqldump and mongodump for backups
 FROM alpine:3.24
 
-RUN apk add --no-cache postgresql18-client mariadb-client ca-certificates tzdata && \
+RUN apk add --no-cache postgresql18-client mariadb-client mongodb-tools ca-certificates tzdata && \
     addgroup -S nonroot && adduser -S -G nonroot nonroot
 
 WORKDIR /app

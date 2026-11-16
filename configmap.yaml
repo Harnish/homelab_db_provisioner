@@ -6,12 +6,17 @@ metadata:
 data:
   config.json: |
     {
-      "root_connection_string": "postgres://postgres:rootpassword@postgres-service:5432/postgres?sslmode=disable",
-      "databases": [
+      "servers": [
         {
-          "database": "app_db",
-          "user": "app_user",
-          "password": "securepassword123"
+          "name": "Main PostgreSQL",
+          "root_connection_string": "postgres://postgres:rootpassword@postgres-service:5432/postgres?sslmode=disable",
+          "databases": [
+            {
+              "database": "app_db",
+              "user": "app_user",
+              "password": "securepassword123"
+            }
+          ]
         }
       ]
     }

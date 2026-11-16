@@ -1,6 +1,7 @@
 .worktrees/
 .superpowers/
 /homelab-db-provisioner
+/homelab_db_provisioner
 /provisioner
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).

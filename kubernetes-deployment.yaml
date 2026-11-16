@@ -4,7 +4,7 @@
 # Supports both PostgreSQL and MariaDB/MySQL
 #
 # Prerequisites:
-# 1. Build and push the image: docker build -t homelab-db-provisioner:latest .
+# 1. The image is published at ghcr.io/harnish/homelab_db_provisioner (or build your own: docker build -t homelab-db-provisioner .)
 # 2. Create ConfigMap with config.json: kubectl create configmap homelab-db-provisioner-config --from-file=config.json
 #
 # Usage:
@@ -75,7 +75,7 @@ spec:
       serviceAccountName: homelab-db-provisioner
       containers:
       - name: provisioner
-        image: homelab-db-provisioner:latest
+        image: ghcr.io/harnish/homelab_db_provisioner:latest
         imagePullPolicy: IfNotPresent
         env:
         - name: CONFIG_PATH
