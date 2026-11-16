@@ -89,7 +89,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
       }
     }
     * { box-sizing: border-box; }
-    body { font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); max-width: 1280px; margin: var(--s8) auto; padding: 0 var(--s4); }
+    body { font: 0.9375rem/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); max-width: 1280px; margin: var(--s8) auto; padding: 0 var(--s4); }
     ::selection { background: var(--sel); color: var(--fg); }
     input, select { caret-color: var(--accent); }
     pre { scrollbar-color: var(--line-strong) transparent; }
@@ -170,11 +170,12 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
     input:focus-visible, select:focus-visible, button:focus-visible, pre:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
     button { font: inherit; font-size: 0.875rem; min-height: 2rem; padding: 0 var(--s3); border: 1px solid var(--line-strong); border-radius: 4px; background: var(--control); color: var(--fg); cursor: pointer; }
     button:hover { background: var(--hover); }
-    button:disabled { color: var(--muted); background: var(--panel); border-color: var(--line); cursor: not-allowed; }
     button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
     button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
     button.danger { color: var(--err); border-color: var(--err-line); }
     button.danger:hover { background: var(--err-bg); }
+    /* Last, so it beats the variants and their hover states (equal specificity, later wins). */
+    button:disabled, button:disabled:hover { color: var(--muted); background: var(--panel); border-color: var(--line); cursor: not-allowed; }
 
     .col-right form { border: 1px solid var(--line); border-radius: 6px; padding: var(--s4); margin-bottom: var(--s8); }
 
