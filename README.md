@@ -1,6 +1,6 @@
 # Database Provisioner
 
-A Go-based application that automates PostgreSQL and MariaDB/MySQL database and user provisioning. It runs in a Docker container or as a systemd service, creating databases with dedicated users based on a configuration file. Ideal for homelab users who want to easily setup the databases.  
+A Go-based application that automates PostgreSQL, MariaDB/MySQL and MongoDB database and user provisioning. It runs in a Docker container or as a systemd service, creating databases with dedicated users based on a configuration file. Ideal for homelab users who want to easily setup the databases.  
 
 ## Features
 
@@ -15,7 +15,7 @@ A Go-based application that automates PostgreSQL and MariaDB/MySQL database and 
 - Configurable via JSON
 - **Watch mode**: Continuously monitors config file for changes
 - **Admin web UI**: Optional browser-based interface to add databases and change passwords ([screenshots](#admin-web-ui))
-- **Automated backups**: Scheduled daily or weekly backups with configurable retention (PostgreSQL: `pg_dump`, MariaDB: `mysqldump`)
+- **Automated backups**: Scheduled daily or weekly backups with configurable retention (PostgreSQL: `pg_dump`, MariaDB: `mysqldump`, MongoDB: `mongodump`)
 - **Auto-restore**: Optionally restores from the newest backup when a database is first created
 - **Kubernetes native**: Works seamlessly with ConfigMaps
 - **PostgreSQL extensions**: Automatically installs specified extensions into each database
@@ -24,7 +24,7 @@ A Go-based application that automates PostgreSQL and MariaDB/MySQL database and 
 
 ## Configuration
 
-Create a `config.json` file with your database server configurations. You can manage multiple database servers (PostgreSQL and/or MariaDB) in a single configuration file.
+Create a `config.json` file with your database server configurations. You can manage multiple database servers (PostgreSQL, MariaDB/MySQL and MongoDB) in a single configuration file.
 
 ### Single Server Configuration
 
@@ -107,9 +107,10 @@ Create a `config.json` file with your database server configurations. You can ma
     - MariaDB: `mariadb://user:pass@host:port/` or `mysql://user:pass@host:port/`
     - MongoDB: `mongodb://user:pass@host:port/admin` or `mongodb+srv://user:pass@host/admin`
   - `databases`: Array of database configurations for this server
-    - `database`: Name of the database to create
+    - `database`: Name of the database to create. Names (and `user`) may use letters, digits and `_ $ . -`, up to 63 characters, and can't start with `.`, `$` or `-`.
     - `user`: Username to create/manage
     - `password`: Password for the user
+    - `permissions`: Optional list of privileges to grant instead of all privileges. MariaDB/MySQL: any privileges valid on a database, e.g. `["SELECT", "INSERT", "UPDATE"]`. PostgreSQL: database-level privileges only (`CREATE`, `CONNECT`, `TEMPORARY`); the user owns the database, so it always has full rights on its tables. Ignored for MongoDB.
     - `requires_connect_string`: `true` to also store a full connection string (e.g. `postgres://user:pass@host:port/db`) under the `connection_string` key of the managed Kubernetes Secret. Only takes effect when `USE_KUBERNETES_SECRETS=true` — see [Kubernetes Secrets Mode](#kubernetes-secrets-mode).
     - `mirror_secret`: Transition aid. Name of a Kubernetes Secret to fill with the current config `password` (plus `connection_string` if `requires_connect_string`). The config stays the source of truth and the Secret is rewritten if it drifts, so you can point an app at the Secret and test it before cutting over (cutover = remove `password`, set `k8s_secret`, or use "Move to Secret" in the admin UI). Needs `USE_KUBERNETES_SECRETS=true`; ignored when `k8s_secret` is set.
     - `extensions`: Optional list of PostgreSQL extensions to install in the database (e.g. `["uuid-ossp", "pgcrypto"]`). Each extension is created with `CREATE EXTENSION IF NOT EXISTS`. Not supported for MariaDB.
@@ -119,7 +120,7 @@ Create a `config.json` file with your database server configurations. You can ma
       - `keep_count`: Number of backup files to retain (0 = keep all)
       - `restore_on_create`: `true` to restore from the newest backup when the database is first created
 
-**Note**: The application automatically detects the database type for each server based on the connection string prefix. The `extensions` and `permissions` fields are PostgreSQL-only and are ignored for MariaDB and MongoDB servers.
+**Note**: The application automatically detects the database type for each server based on the connection string prefix. The `extensions` field is PostgreSQL-only and is ignored for MariaDB and MongoDB servers.
 
 ### PostgreSQL Extensions
 
@@ -165,9 +166,11 @@ This will:
 
 ### Using Docker Directly
 
-1. Build the image:
+1. Pull the published image (amd64 and arm64), or build it yourself:
 
 ```bash
+docker pull ghcr.io/harnish/homelab_db_provisioner:latest
+# or
 docker build -t homelab-db-provisioner .
 ```
 
@@ -320,10 +323,11 @@ The root connection string must point to the `admin` database so the provisioner
   - Automatically flushes privileges after changes
 - **MongoDB**:
   - Connects to the `admin` database using the root connection string
-  - Drops and recreates the user on each run to apply any password change (idempotent)
+  - Creates the user, or updates its password and role in place if it already exists
   - Grants the `readWrite` role on the target database
   - Creates a `{database}_data` collection on first run to materialize the database (MongoDB databases are created implicitly when data is first written)
 - Includes connection retry logic (5 attempts with 5-second delays)
+- If a server stays unreachable, the other servers are still provisioned. Watch mode then tries again every 60 seconds; a one-shot run exits with status 1 so a Kubernetes Job or systemd unit retries or reports the failure
 - Automatically detects database type from connection string
 
 ## Admin Web UI
@@ -402,7 +406,11 @@ Every admin action is also available as a JSON API under `/api/servers`, using t
 | `PATCH` | `/api/servers/{si}/databases/{di}` | Update a database |
 | `DELETE` | `/api/servers/{si}/databases/{di}` | Delete a database entry |
 
-`{si}` and `{di}` are array indices (0-based), the same ones used by the web UI's `server_index`/`db_index` form fields. They are not stable IDs — deleting an earlier entry shifts the indices after it. Responses never include the `password` field, matching the web UI (which also never displays a stored password).
+`{si}` and `{di}` are array indices (0-based), the same ones used by the web UI's `server_index`/`db_index` form fields. They are not stable IDs — deleting an earlier entry shifts the indices after it. Responses never include the `password` field, matching the web UI (which also never displays a stored password), and the password inside `root_connection_string` is replaced with `REDACTED`. When updating a server, send the real connection string; one containing the placeholder is rejected.
+
+Requests are rejected with `400` when a database or user name has characters outside letters, digits and `_ $ . -`, when a permission or extension name is malformed, when a server already has a database of that name, or when a server name is empty or matches an existing one.
+
+`GET /healthz` returns `200` without authentication, for Kubernetes liveness and readiness probes.
 
 > **Note:** `DELETE` only removes the entry from `config.json`. It does not run `DROP DATABASE`/`DROP USER` against the real server — dropping the actual database/user is intentionally out of scope.
 
@@ -445,7 +453,7 @@ curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" http://localhost:8080/api/servers/0/dat
 ```bash
 curl -s -u "$ADMIN_USER:$ADMIN_PASSWORD" -X POST http://localhost:8080/api/servers/0/databases \
   -H "Content-Type: application/json" \
-  -d '{"database":"myapp","user":"myapp_user","password":"s3cret","permissions":["SELECT","INSERT","UPDATE"]}'
+  -d '{"database":"myapp","user":"myapp_user","password":"s3cret"}'
 ```
 
 **Update a database** (e.g. rotate password and enable weekly backups):
@@ -587,7 +595,7 @@ The provisioner can automatically back up databases using `pg_dump` (PostgreSQL)
 
 Backups are compressed with gzip and stored next to the config file.
 
-> **MongoDB tools**: `mongodump` and `mongorestore` must be installed separately. They are not bundled in the Docker image. Install the [MongoDB Database Tools](https://www.mongodb.com/try/download/database-tools) package on the host or add it to a custom image layer.
+> **MongoDB tools**: the Docker image includes `mongodump` and `mongorestore`. When running the binary directly (deb/rpm or `go build`), install the [MongoDB Database Tools](https://www.mongodb.com/try/download/database-tools) yourself.
 
 ### Directory Structure
 
@@ -616,6 +624,7 @@ MongoDB backups use the `.archive.gz` extension (mongodump archive format) rathe
 
 - **Daily**: runs at midnight every day
 - **Weekly**: runs at midnight every Sunday
+- **Catch-up**: two minutes after startup, any enabled backup with no file from today (daily) or the last seven days (weekly) is taken straight away, so a restart across midnight doesn't skip a backup
 
 Backups only run while the provisioner is running. Use `WATCH_MODE=true` (or a Kubernetes Deployment) to keep it running long-term.
 
@@ -685,11 +694,19 @@ Add a PersistentVolumeClaim and mount it at the same path as the config director
 
 ## Security Considerations
 
-1. **Protect config.json**: Contains sensitive credentials
-2. **Use strong passwords**: Especially for the root connection
-3. **Enable SSL**: In production, use `sslmode=require` in connection strings
-4. **Limit network access**: Don't expose PostgreSQL directly to the internet
-5. **Use secrets management**: Consider using Docker secrets or environment variables for sensitive data
+What the provisioner needs and what it does and doesn't protect:
+
+- **It holds superuser credentials.** Every `root_connection_string` is a database superuser login. Treat the provisioner's config, pod and host accordingly.
+- **`config.json` stores passwords in plain text** unless you use [Kubernetes Secrets Mode](#kubernetes-secrets-mode). The provisioner writes it with mode `0600`; keep it out of git and out of world-readable ConfigMaps.
+- **The admin UI and API use HTTP Basic Auth over plain HTTP.** Anyone on the network path can read the admin password. Put it behind a TLS-terminating reverse proxy or ingress, or keep it on a trusted network. Don't expose it to the internet.
+- **Admin access is full access.** Anyone with the admin password can add servers, read database passwords (Show) and schedule a migration that drops a database.
+- **Backups are unencrypted** SQL dumps, written with mode `0600`. Protect the backups volume and the S3 bucket like the databases themselves.
+- **SQL statements are logged with passwords redacted**, including in dry-run mode.
+- Use `sslmode=require` (or stricter) in connection strings when the database isn't on the same host or a trusted network.
+
+### Reporting security issues
+
+Please report vulnerabilities privately through the "Report a vulnerability" button on the repository's Security tab rather than a public issue.
 
 ## Building Packages
 

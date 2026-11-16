@@ -11,7 +11,8 @@ go test ./...
 # Run a single test
 go test -run TestUpdatePassword_Success ./...
 
-# Run integration tests (needs MIGRATE_SOURCE_CONN / MIGRATE_TARGET_CONN)
+# Run integration tests (need MIGRATE_SOURCE_CONN / MIGRATE_TARGET_CONN /
+# TEST_MARIADB_CONN / TEST_MONGO_CONN; each test skips if its variable is unset)
 go test -tags integration ./...
 
 # Build the binary
@@ -43,7 +44,7 @@ The entire application lives in four Go files in the package root (`package main
 
 1. `main()` reads `CONFIG_PATH` and optionally starts the admin server in a goroutine.
 2. In one-shot mode, `loadConfig()` → `processConfig()` runs once and exits.
-3. In watch mode, a polling loop (`runWatchMode`) checks the config file's mtime every 10 seconds and re-runs `processConfig()` on change.
+3. In watch mode, a polling loop (`runWatchMode`) checks the config file's mtime every 10 seconds and re-runs `processConfig()` on change. If a server was unreachable (`errServerUnreachable`), it also re-runs after 60 seconds without waiting for a change.
 4. `processConfig()` iterates over `Config.Servers`, detects DB type from the connection string prefix (`postgres://` vs `mariadb://`/`mysql://`), converts MariaDB URLs to the go-sql-driver DSN format, then calls `provisionPostgreSQL` or `provisionMariaDB` per database entry.
 
 ### Concurrency
@@ -59,19 +60,25 @@ The entire application lives in four Go files in the package root (`package main
 
 Config writes use `json.MarshalIndent` and `os.WriteFile` with `0600` permissions. The admin UI is most useful with `WATCH_MODE=true` since the provisioner auto-picks up the written changes.
 
+### Input validation and quoting
+
+`validateDatabaseConfig` (`main.go`) is the single gate for database/user names, permissions and extensions. The three `provision*` functions call it, and so do the API and admin handlers (via `checkDatabase` in `api.go`). Names also become backup directory names, so it rejects path separators. Use `quoteIdentifier`/`pq.QuoteLiteral` for PostgreSQL and `mysqlIdentifier`/`mysqlLiteral` for MariaDB; never interpolate a name or password into SQL directly, and never log a statement that contains a password (use `redactedLiteral`).
+
+All config writes go through `saveConfigFile` (`api.go`), which writes a temp file and renames it. `pg_dump`/`psql` are built with `pgCommand` and the Mongo tools with `runMongoTool`, which keep passwords out of process arguments.
+
 ### DB type detection
 
-`detectDBType` inspects the connection string prefix. MariaDB/MySQL URLs are reformatted from `mariadb://user:pass@host:port/db` to the `go-sql-driver/mysql` DSN `user:pass@tcp(host:port)/db` inline in `processConfig`.
+`detectDBType` inspects the connection string prefix. MariaDB/MySQL URLs are reformatted from `mariadb://user:pass@host:port/db` to the `go-sql-driver/mysql` DSN `user:pass@tcp(host:port)/db` by `mariaDBDSN` (`backup.go`).
 
 ### Backup scheduler
 
-`startBackupScheduler` (called as a goroutine from `main`) sleeps until the next midnight, then calls `runBackups`. It reads the live config (under `configMu.RLock`) on each tick so config changes are picked up without a restart.
+`startBackupScheduler` (called as a goroutine from `main`) waits two minutes, runs a catch-up pass (`runBackups` with `catchUp=true`: only backups whose newest local file is older than their schedule, decided by `backupDue`), then sleeps until each midnight and calls `runBackups`. It reads the live config (under `configMu.RLock`) on each tick so config changes are picked up without a restart.
 
 `provisionPostgreSQL` and `provisionMariaDB` now return `(bool, error)` where the bool signals that the database was **newly created** (did not previously exist). `processConfig` uses this to gate the optional restore: if `created && !dryRun && backup.restore_on_create`, it calls `restoreDatabase`, which calls `findNewestBackup` (globs `backups/{server-slug}/{database}/{database}_*.sql.gz`, sorts alphabetically, returns the last entry) and pipes the decompressed file into `psql` or `mysql`. `MariaDB` added `checkMariaDBDatabaseExists` to support the created-flag logic.
 
 `runBackups` iterates all servers/databases with `backup.enabled: true`. Daily backups run every midnight; weekly backups run only when `time.Now().Weekday() == time.Sunday`. It calls `backupPostgreSQL` (which rewrites the connection string path to the target DB and shells out to `pg_dump`) or `backupMariaDB` (shells out to `mysqldump` with `MYSQL_PWD` set in the subprocess env). Output is gzip-compressed directly from the command's stdout into `{config_dir}/backups/{server-slug}/{database}/{database}_{YYYY-MM-DD}.sql.gz`. After a successful backup, `pruneBackups` sorts the glob matches alphabetically (date-prefixed names sort chronologically) and deletes the oldest files beyond `keep_count`.
 
-The Dockerfile final stage uses `alpine:3.24` (instead of distroless) to provide `pg_dump` (`postgresql18-client`) and `mysqldump` (`mariadb-client`). MongoDB tools (`mongodump`/`mongorestore`) are not bundled and must be installed separately.
+The Dockerfile final stage uses `alpine:3.24` (instead of distroless) to provide `pg_dump` (`postgresql18-client`) and `mysqldump` (`mariadb-client`). `mongodump`/`mongorestore` come from `mongodb-tools`.
 
 When `Config.S3` is set (top-level `s3` block: `bucket`, `region`, optional `endpoint` for MinIO/S3-compatible targets, optional `prefix`), every successful local backup is also uploaded to `s3://{bucket}/{prefix}/{server-slug}/{database}/{filename}` and pruned to the same `keep_count` as the local copy. S3 credentials come from the environment (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/etc., the AWS SDK default chain) — never from `config.json`. If `restore_on_create` triggers a restore and no local backup file exists (e.g. a fresh container with an empty `backups/` volume), `findNewestBackup` falls back to downloading the newest object from S3. All S3 operations are logged and non-fatal; local backup/restore is unaffected if S3 is unreachable or unconfigured.
 
@@ -91,7 +98,7 @@ A `migrate` block on a database entry (`target_server`, optional `confirm_drop`)
 4. Verifies by comparing per-base-table row counts source vs target (`verifyMigration`). The backup-fallback path only checks the target is non-empty (`verifyTargetNonEmpty`).
 5. On success sets `migrate.completed` + `completed_at`. If `confirm_drop`, runs `DROP DATABASE ... WITH (FORCE)` on the source (the role is left intact).
 
-Failures are recorded in `migrate.error` and are never fatal. A completed entry becomes a tombstone: the `processConfig` provisioning loop, `runBackups`, and the Mongo backup scheduler all skip it, and `allDatabasesMigrated` short-circuits a server whose entries are all tombstones (no connection attempt). The operator then removes the entry or relocates it to the target server. The admin UI writes/clears the `migrate` block via `POST /migrate-database`.
+Failures are recorded in `migrate.error` and are never fatal. A failed entry is not retried until the operator reschedules it (recording the failure rewrites the config, so retrying on every pass would loop), and a failure removes the target database that run created, so the retry starts clean. A completed entry becomes a tombstone: the `processConfig` provisioning loop, `runBackups`, and the Mongo backup scheduler all skip it, and `allDatabasesMigrated` short-circuits a server whose entries are all tombstones (no connection attempt). The operator then removes the entry or relocates it to the target server. The admin UI writes/clears the `migrate` block via `POST /migrate-database`.
 
 Verification limitation: only base-table row-count parity is checked; sequences, views, functions, and grants are restored by `pg_dump` but not independently verified.
 
