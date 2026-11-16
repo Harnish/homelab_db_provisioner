@@ -149,14 +149,23 @@ func downloadNewestFromS3(ctx context.Context, client *s3.Client, cfg *S3Config,
 	}
 	defer getOut.Body.Close()
 
+	// Download under another name first: a truncated file with the real name
+	// would be picked up as the newest local backup next time.
 	localPath := filepath.Join(localDestDir, filepath.Base(key))
-	f, err := os.Create(localPath)
+	partPath := localPath + ".part"
+	f, err := createPrivate(partPath)
 	if err != nil {
 		return "", fmt.Errorf("create local file: %w", err)
 	}
-	defer f.Close()
-
-	if _, err := io.Copy(f, getOut.Body); err != nil {
+	_, err = io.Copy(f, getOut.Body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(partPath, localPath)
+	}
+	if err != nil {
+		os.Remove(partPath)
 		return "", fmt.Errorf("write local file: %w", err)
 	}
 

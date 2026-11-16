@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTempConfig(t *testing.T, cfg Config) string {
@@ -43,7 +44,7 @@ func TestPersistMigrate_WritesBlock(t *testing.T) {
 	}}}
 	path := writeTempConfig(t, cfg)
 
-	persistMigrate(path, 0, 0, MigrateConfig{TargetServer: "new-pg", Error: "boom"})
+	persistMigrate(path, "old-pg", "app", MigrateConfig{TargetServer: "new-pg", Error: "boom"})
 
 	got := readConfig(t, path).Servers[0].Databases[0].Migrate
 	if got == nil || got.TargetServer != "new-pg" || got.Error != "boom" {
@@ -51,10 +52,10 @@ func TestPersistMigrate_WritesBlock(t *testing.T) {
 	}
 }
 
-func TestPersistMigrate_OutOfRangeIsNoop(t *testing.T) {
+func TestPersistMigrate_UnknownEntryIsNoop(t *testing.T) {
 	cfg := Config{Servers: []DatabaseServer{{Name: "s", Databases: []DatabaseConfig{{Database: "d"}}}}}
 	path := writeTempConfig(t, cfg)
-	persistMigrate(path, 5, 5, MigrateConfig{TargetServer: "x"}) // must not panic
+	persistMigrate(path, "gone", "d", MigrateConfig{TargetServer: "x"}) // must not panic
 	if readConfig(t, path).Servers[0].Databases[0].Migrate != nil {
 		t.Error("expected no change")
 	}
@@ -180,5 +181,50 @@ func TestCompareTableCounts_CountMismatch(t *testing.T) {
 	b := map[string]int64{"public.users": 9}
 	if err := compareTableCounts(a, b); err == nil || !strings.Contains(err.Error(), "users") {
 		t.Fatalf("want count-mismatch error, got %v", err)
+	}
+}
+
+func TestPersistMigrate_UnchangedSkipsWrite(t *testing.T) {
+	m := MigrateConfig{TargetServer: "new-pg", Error: "boom"}
+	cfg := Config{Servers: []DatabaseServer{{
+		Name: "old-pg", RootConnectionString: "postgres://r:p@old/postgres",
+		Databases: []DatabaseConfig{{Database: "app", User: "app", Migrate: &m}},
+	}}}
+	path := writeTempConfig(t, cfg)
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	persistMigrate(path, "old-pg", "app", m)
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.ModTime().Equal(old) {
+		t.Error("unchanged migrate block rewrote the config; that wakes the watch loop")
+	}
+}
+
+// A failed migration must wait for the operator. Retrying it on every pass
+// loops forever, because recording the failure rewrites the config file.
+func TestProcessConfig_FailedMigrationIsNotRetried(t *testing.T) {
+	cfg := Config{Servers: []DatabaseServer{{
+		Name: "old-pg", RootConnectionString: "postgres://r:p@old/postgres",
+		Databases: []DatabaseConfig{{
+			Database: "app", User: "app", Password: "pw",
+			Migrate: &MigrateConfig{TargetServer: "ghost", Error: "original cause"},
+		}},
+	}}}
+	path := writeTempConfig(t, cfg)
+	t.Setenv("CONFIG_PATH", path)
+
+	migrationPass(&cfg)
+
+	// Had it run, the unknown target would have replaced the error.
+	got := readConfig(t, path).Servers[0].Databases[0].Migrate
+	if got == nil || got.Error != "original cause" {
+		t.Fatalf("failed migration was retried and its error replaced: %+v", got)
 	}
 }

@@ -13,8 +13,7 @@
         {
           "database": "analytics_db",
           "user": "analytics_user",
-          "password": "analyticspass456",
-          "permissions": ["SELECT", "INSERT"]
+          "password": "analyticspass456"
         }
       ]
     },

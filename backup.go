@@ -18,25 +18,55 @@ import (
 )
 
 func startBackupScheduler(configPath string) {
+	// Backups only fire at midnight, so one missed while the provisioner was
+	// down would otherwise wait a day (or a week). Catch up once at startup,
+	// after the first provisioning pass has had time to create new databases.
+	time.Sleep(2 * time.Minute)
+	catchUp := true
 	for {
-		now := time.Now()
-		next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
-		time.Sleep(time.Until(next))
-
 		t := time.Now()
 		configMu.RLock()
 		config, err := loadConfig()
 		configMu.RUnlock()
 		if err != nil {
 			log.Printf("backup: load config: %v", err)
-			continue
+		} else {
+			runBackups(config, configPath, t, catchUp)
 		}
-		runBackups(config, configPath, t)
+		catchUp = false
+
+		now := time.Now()
+		next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+		time.Sleep(time.Until(next))
 	}
 }
 
-func runBackups(config *Config, configPath string, t time.Time) {
-	isWeeklyDay := t.Weekday() == time.Sunday
+// backupDue reports whether db should be backed up in this run. A scheduled
+// run takes every daily backup, and weekly ones on Sundays. A catch-up run
+// takes only those whose newest local backup is older than the schedule.
+func backupDue(configPath, serverName string, db DatabaseConfig, t time.Time, catchUp bool) bool {
+	if db.Migrate != nil && db.Migrate.Completed {
+		return false
+	}
+	if db.Backup == nil || !db.Backup.Enabled {
+		return false
+	}
+	weekly := db.Backup.Schedule == "weekly"
+	if !catchUp {
+		return !weekly || t.Weekday() == time.Sunday
+	}
+	today := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+	days, ok := newestBackupDays(configPath, serverName, db.Database, today)
+	if !ok {
+		return true
+	}
+	if weekly {
+		return days >= 7
+	}
+	return days >= 1
+}
+
+func runBackups(config *Config, configPath string, t time.Time, catchUp bool) {
 	backupBase := filepath.Join(filepath.Dir(configPath), "backups")
 
 	var s3Client *s3.Client
@@ -54,18 +84,12 @@ func runBackups(config *Config, configPath string, t time.Time) {
 
 		// Handle MongoDB separately
 		if dbType == MongoDB {
-			mongoDBBackupSchedule(config, configPath, t, s3Client)
+			backupMongoServer(config, server, configPath, t, catchUp, s3Client)
 			continue
 		}
 
 		for _, db := range server.Databases {
-			if db.Migrate != nil && db.Migrate.Completed {
-				continue
-			}
-			if db.Backup == nil || !db.Backup.Enabled {
-				continue
-			}
-			if db.Backup.Schedule == "weekly" && !isWeeklyDay {
+			if !backupDue(configPath, server.Name, db, t, catchUp) {
 				continue
 			}
 
@@ -92,7 +116,7 @@ func runBackups(config *Config, configPath string, t time.Time) {
 
 			log.Printf("backup: created %s", filename)
 			if db.Backup.KeepCount > 0 {
-				pruneBackups(dir, db.Database, db.Backup.KeepCount)
+				pruneBackups(dir, db.Database, ".sql.gz", db.Backup.KeepCount)
 			}
 
 			if config.S3 != nil && s3Client != nil {
@@ -106,6 +130,29 @@ func runBackups(config *Config, configPath string, t time.Time) {
 			}
 		}
 	}
+}
+
+// createPrivate creates a dump file readable only by the provisioner's user:
+// dumps hold everything the database does.
+func createPrivate(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+}
+
+// pgCommand builds a pg_dump/psql command for connStr with the password
+// passed in PGPASSWORD rather than on the command line, where any local user
+// could read it from the process list.
+func pgCommand(name, connStr string, args ...string) *exec.Cmd {
+	env := os.Environ()
+	if u, err := url.Parse(connStr); err == nil && u.User != nil {
+		if pw, ok := u.User.Password(); ok {
+			env = append(env, "PGPASSWORD="+pw)
+			u.User = url.User(u.User.Username())
+			connStr = u.String()
+		}
+	}
+	cmd := exec.Command(name, append(append([]string{"--no-password"}, args...), connStr)...)
+	cmd.Env = env
+	return cmd
 }
 
 // connStrWithDB rewrites a root connection URL to point at a specific database.
@@ -124,13 +171,13 @@ func backupPostgreSQL(rootConnStr, database, destFile string) error {
 		return err
 	}
 
-	f, err := os.Create(destFile)
+	f, err := createPrivate(destFile)
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
 
 	gz := gzip.NewWriter(f)
-	cmd := exec.Command("pg_dump", "--no-password", connStr)
+	cmd := pgCommand("pg_dump", connStr)
 	cmd.Stdout = gz
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -153,7 +200,7 @@ func backupMariaDB(rootConnStr, database, destFile string) error {
 		return fmt.Errorf("parse connection string: %w", err)
 	}
 
-	f, err := os.Create(destFile)
+	f, err := createPrivate(destFile)
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
@@ -199,12 +246,27 @@ func parseMariaDBConn(connStr string) (host, port, user, pass string, err error)
 	user = creds[:colonIdx]
 	pass = creds[colonIdx+1:]
 
-	host, port, err = net.SplitHostPort(hostPort)
+	if host, port, err = net.SplitHostPort(hostPort); err != nil {
+		// No port given: the server default.
+		host, port, err = hostPort, "3306", nil
+	}
 	return
 }
 
-func pruneBackups(dir, database string, keepCount int) {
-	pattern := filepath.Join(dir, database+"_*.sql.gz")
+// mariaDBDSN converts mariadb://user:pass@host:port/db?params into the
+// go-sql-driver DSN user:pass@tcp(host:port)/db?params.
+func mariaDBDSN(connStr string) (string, error) {
+	host, port, user, pass, err := parseMariaDBConn(connStr)
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimPrefix(strings.TrimPrefix(connStr, "mariadb://"), "mysql://")
+	_, rest, _ := strings.Cut(s, "/")
+	return user + ":" + pass + "@tcp(" + net.JoinHostPort(host, port) + ")/" + rest, nil
+}
+
+func pruneBackups(dir, database, suffix string, keepCount int) {
+	pattern := filepath.Join(dir, database+"_*"+suffix)
 	files, err := filepath.Glob(pattern)
 	if err != nil || len(files) <= keepCount {
 		return
@@ -298,12 +360,18 @@ func restorePostgreSQL(rootConnStr, database, backupFile string) error {
 	}
 	defer gz.Close()
 
-	cmd := exec.Command("psql", "--no-password", connStr)
+	cmd := pgCommand("psql", connStr)
 	cmd.Stdin = gz
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("psql: %w: %s", err, stderr.String())
+	}
+	// psql exits 0 after failed statements. Aborting on the first one would
+	// reject dumps that restore fine apart from a harmless error (a setting
+	// the target version lacks), so finish, but don't report a clean restore.
+	if strings.Contains(stderr.String(), "ERROR:") {
+		log.Printf("restore: psql reported errors, %s may be incomplete: %s", database, stderr.String())
 	}
 	return nil
 }

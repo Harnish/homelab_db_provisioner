@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -34,7 +37,43 @@ func saveConfigFile(configPath string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, out, 0600)
+	return writeFileAtomic(configPath, out)
+}
+
+// writeFileAtomic replaces path with data via a temp file and rename, so a
+// crash or full disk mid-write can't leave the config (which holds every
+// password) empty or truncated. Where a rename isn't possible (a single-file
+// bind mount, a read-only directory) it writes in place as before.
+func writeFileAtomic(path string, data []byte) error {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved // replace the file a symlink points at, not the link
+	}
+	mode := os.FileMode(0600)
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
+		return os.WriteFile(path, data, 0600)
+	}
+	defer os.Remove(tmp.Name()) // no-op once renamed
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Chmod(mode)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return os.WriteFile(path, data, 0600)
+	}
+	return nil
 }
 
 type databaseResponse struct {
@@ -75,10 +114,66 @@ func toServerResponse(si int, s DatabaseServer) serverResponse {
 	return serverResponse{
 		Index:                si,
 		Name:                 s.Name,
-		RootConnectionString: s.RootConnectionString,
+		RootConnectionString: redactConnString(s.RootConnectionString),
 		DryRun:               s.DryRun,
 		Databases:            dbs,
 	}
+}
+
+const redactedPassword = "REDACTED"
+
+// redactConnString hides the password in a connection URL for API responses.
+// It cuts from the first ":" after the scheme to the last "@", so a password
+// with unusual characters is over-redacted rather than leaked.
+func redactConnString(s string) string {
+	i := strings.Index(s, "://")
+	if i < 0 {
+		return s
+	}
+	rest := s[i+3:]
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return s
+	}
+	colon := strings.Index(rest[:at], ":")
+	if colon < 0 {
+		return s
+	}
+	return s[:i+3] + rest[:colon+1] + redactedPassword + rest[at:]
+}
+
+// checkServer validates a server being created or updated at index skip
+// (-1 for a new one). Names are looked up by migrations and slugged into
+// backup directory names, so they must be unique after slugging too.
+func checkServer(cfg *Config, name, rootConnStr string, skip int) error {
+	if slugify(name) == "" {
+		return fmt.Errorf("server name must contain a letter or digit")
+	}
+	// A client that reads a server and writes it back would otherwise
+	// replace the real password with the placeholder.
+	if strings.Contains(rootConnStr, ":"+redactedPassword+"@") {
+		return fmt.Errorf("root_connection_string contains the %s placeholder; send the real password", redactedPassword)
+	}
+	for i, s := range cfg.Servers {
+		if i != skip && slugify(s.Name) == slugify(name) {
+			return fmt.Errorf("a server named %q already exists", s.Name)
+		}
+	}
+	return nil
+}
+
+// checkDatabase validates db for server and rejects a second entry with the
+// same database name (skip is the index being updated, -1 for a new one).
+func checkDatabase(server DatabaseServer, db DatabaseConfig, skip int) error {
+	if err := validateDatabaseConfig(detectDBType(server.RootConnectionString), db); err != nil {
+		return err
+	}
+	for i, d := range server.Databases {
+		if i != skip && d.Database == db.Database {
+			return fmt.Errorf("%s already has a database named %s", server.Name, db.Database)
+		}
+	}
+	return nil
 }
 
 func handleAPIListServers(configPath string) http.HandlerFunc {
@@ -146,6 +241,10 @@ func handleAPICreateServer(configPath string) http.HandlerFunc {
 			writeJSONError(w, http.StatusInternalServerError, "failed to read config: "+err.Error())
 			return
 		}
+		if err := checkServer(cfg, req.Name, req.RootConnectionString, -1); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		newServer := DatabaseServer{
 			Name:                 req.Name,
 			RootConnectionString: req.RootConnectionString,
@@ -203,6 +302,16 @@ func handleAPIUpdateServer(configPath string) http.HandlerFunc {
 		}
 		if req.DryRun != nil {
 			cfg.Servers[si].DryRun = *req.DryRun
+		}
+		if req.RootConnectionString != nil && *req.RootConnectionString == "" {
+			writeJSONError(w, http.StatusBadRequest, "root_connection_string can't be empty")
+			return
+		}
+		if req.Name != nil || req.RootConnectionString != nil {
+			if err := checkServer(cfg, cfg.Servers[si].Name, cfg.Servers[si].RootConnectionString, si); err != nil {
+				writeJSONError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 
 		if err := saveConfigFile(configPath, cfg); err != nil {
@@ -364,6 +473,10 @@ func handleAPICreateDatabase(configPath string) http.HandlerFunc {
 			Extensions:  req.Extensions,
 			Backup:      req.Backup,
 		}
+		if err := checkDatabase(cfg.Servers[si], newDB, -1); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if secretsManager != nil {
 			if newDB.K8sSecret, err = claimSecretName(cfg, req.SecretName, req.Database); err != nil {
 				writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -442,6 +555,10 @@ func handleAPIUpdateDatabase(configPath string) http.HandlerFunc {
 		}
 		if req.Backup != nil {
 			db.Backup = req.Backup
+		}
+		if err := checkDatabase(cfg.Servers[si], *db, di); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 
 		if err := saveConfigFile(configPath, cfg); err != nil {

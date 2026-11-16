@@ -249,7 +249,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
           <span><span class="lbl">Migration</span>
             {{if not $db.Migrate}}<span class="muted">&mdash;<span class="vh">none</span></span>
             {{else if $tomb}}<span class="badge info">Migrated</span><span class="sub-line">to {{$db.Migrate.TargetServer}}</span>
-            {{else if $db.Migrate.Error}}<span class="badge err">Failed</span><span class="sub-line">to {{$db.Migrate.TargetServer}}, retrying</span>
+            {{else if $db.Migrate.Error}}<span class="badge err">Failed</span><span class="sub-line">to {{$db.Migrate.TargetServer}}, not retried</span>
             {{else}}<span class="badge warn">Pending</span><span class="sub-line">to {{$db.Migrate.TargetServer}}</span>{{end}}</span>
           <span class="manage">Manage</span>
         </summary>
@@ -396,7 +396,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
               {{end}}
             {{else}}
               {{if $db.Migrate.Error}}
-              <p>Migration to <strong>{{$db.Migrate.TargetServer}}</strong> failed. The provisioner retries it on every pass.</p>
+              <p>Migration to <strong>{{$db.Migrate.TargetServer}}</strong> failed and won't be retried on its own. Fix the cause below, cancel this migration, then schedule it again.</p>
               <p class="error">{{$db.Migrate.Error}}</p>
               {{else}}
               <p>Waiting for the provisioner to migrate this database to <strong>{{$db.Migrate.TargetServer}}</strong>{{if $db.Migrate.ConfirmDrop}}. The source will be dropped once the copy is verified{{end}}.</p>
@@ -608,22 +608,31 @@ func healthFor(configPath string, cfg *Config) []serverHealth {
 
 // backupAge finds the newest local backup ({database}_{YYYY-MM-DD}.*.gz, as
 // written by runBackups) and whether it is older than the schedule allows.
-func backupAge(configPath, server string, db DatabaseConfig, today time.Time) (state, age string) {
-	dir := filepath.Join(filepath.Dir(configPath), "backups", slugify(server), db.Database)
-	files, _ := filepath.Glob(filepath.Join(dir, db.Database+"_*.gz"))
+// newestBackupDays is how many days before today the newest local backup of
+// database was taken; ok is false when there is none.
+func newestBackupDays(configPath, server, database string, today time.Time) (days int, ok bool) {
+	dir := filepath.Join(filepath.Dir(configPath), "backups", slugify(server), database)
+	files, _ := filepath.Glob(filepath.Join(dir, database+"_*.gz"))
 	if len(files) == 0 {
-		return "none", ""
+		return 0, false
 	}
 	sort.Strings(files)
-	stamp := strings.TrimPrefix(filepath.Base(files[len(files)-1]), db.Database+"_")
+	stamp := strings.TrimPrefix(filepath.Base(files[len(files)-1]), database+"_")
 	if len(stamp) < 10 {
-		return "none", ""
+		return 0, false
 	}
 	d, err := time.ParseInLocation("2006-01-02", stamp[:10], time.Local)
 	if err != nil {
+		return 0, false
+	}
+	return int(today.Sub(d).Hours() / 24), true
+}
+
+func backupAge(configPath, server string, db DatabaseConfig, today time.Time) (state, age string) {
+	days, ok := newestBackupDays(configPath, server, db.Database, today)
+	if !ok {
 		return "none", ""
 	}
-	days := int(today.Sub(d).Hours() / 24)
 	switch days {
 	case 0:
 		age = "today"
@@ -679,6 +688,11 @@ func newAdminHandler(configPath string) http.Handler {
 		// dialog on top of the one for "/".
 		if r.URL.Path == "/favicon.ico" {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// Liveness for Kubernetes probes: no auth, nothing from the config.
+		if r.URL.Path == "/healthz" {
+			w.Write([]byte("ok\n"))
 			return
 		}
 		protected.ServeHTTP(w, r)
@@ -879,12 +893,7 @@ func handleUpdatePassword(configPath string) http.HandlerFunc {
 		}
 		cfg.Servers[si].Databases[di].Password = newPassword
 
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
-			return
-		}
-		if err := os.WriteFile(configPath, out, 0600); err != nil {
+		if err := saveConfigFile(configPath, &cfg); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape(writeConfigErrMsg(err)), http.StatusSeeOther)
 			return
 		}
@@ -962,12 +971,7 @@ func handleMigrateDatabase(configPath string) http.HandlerFunc {
 			}
 		}
 
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
-			return
-		}
-		if err := os.WriteFile(configPath, out, 0600); err != nil {
+		if err := saveConfigFile(configPath, &cfg); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape(writeConfigErrMsg(err)), http.StatusSeeOther)
 			return
 		}
@@ -1075,12 +1079,7 @@ func handleGeneratePassword(configPath string) http.HandlerFunc {
 		dbName := cfg.Servers[si].Databases[di].Database
 		cfg.Servers[si].Databases[di].Password = newPassword
 
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
-			return
-		}
-		if err := os.WriteFile(configPath, out, 0600); err != nil {
+		if err := saveConfigFile(configPath, &cfg); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape(writeConfigErrMsg(err)), http.StatusSeeOther)
 			return
 		}
@@ -1160,12 +1159,7 @@ func handleUpdateBackup(configPath string) http.HandlerFunc {
 		}
 		cfg.Servers[si].Databases[di].Backup = &backup
 
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
-			return
-		}
-		if err := os.WriteFile(configPath, out, 0600); err != nil {
+		if err := saveConfigFile(configPath, &cfg); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape(writeConfigErrMsg(err)), http.StatusSeeOther)
 			return
 		}
@@ -1342,12 +1336,7 @@ func handleMoveToSecret(configPath string) http.HandlerFunc {
 		}
 		db.Password = ""
 
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
-			return
-		}
-		if err := os.WriteFile(configPath, out, 0600); err != nil {
+		if err := saveConfigFile(configPath, &cfg); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape(writeConfigErrMsg(err)), http.StatusSeeOther)
 			return
 		}
@@ -1418,6 +1407,10 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 			Permissions:           permissions,
 			RequiresConnectString: r.FormValue("requires_connect_string") == "on",
 		}
+		if err := validateDatabaseConfig(detectDBType(cfg.Servers[si].RootConnectionString), newDB); err != nil {
+			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: "+err.Error()), http.StatusSeeOther)
+			return
+		}
 		if secretsManager != nil {
 			// New databases start out in a Secret; the provisioner generates
 			// the password on its first pass.
@@ -1440,12 +1433,7 @@ func handleAddDatabase(configPath string) http.HandlerFunc {
 		}
 		cfg.Servers[si].Databases = append(cfg.Servers[si].Databases, newDB)
 
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
-			return
-		}
-		if err := os.WriteFile(configPath, out, 0600); err != nil {
+		if err := saveConfigFile(configPath, &cfg); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape(writeConfigErrMsg(err)), http.StatusSeeOther)
 			return
 		}
@@ -1500,12 +1488,7 @@ func handleAddServer(configPath string) http.HandlerFunc {
 		}
 		cfg.Servers = append(cfg.Servers, newServer)
 
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			http.Redirect(w, r, "/?msg="+url.QueryEscape("Error: failed to serialize config"), http.StatusSeeOther)
-			return
-		}
-		if err := os.WriteFile(configPath, out, 0600); err != nil {
+		if err := saveConfigFile(configPath, &cfg); err != nil {
 			http.Redirect(w, r, "/?msg="+url.QueryEscape(writeConfigErrMsg(err)), http.StatusSeeOther)
 			return
 		}

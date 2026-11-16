@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -303,7 +304,7 @@ func TestAPICreateDatabase_Success(t *testing.T) {
 	path := makeTestConfig(t, testConfigJSON)
 	h := newAdminHandler(path)
 
-	body := `{"database":"newdb","user":"newuser","password":"newpass","permissions":["SELECT","INSERT"]}`
+	body := `{"database":"newdb","user":"newuser","password":"newpass","permissions":["CONNECT","TEMPORARY"]}`
 	req := httptest.NewRequest("POST", "/api/servers/0/databases", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.SetBasicAuth("admin", "secret")
@@ -510,5 +511,120 @@ func TestAPIDeleteDatabase_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.json")
+	link := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(real, []byte("old"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeFileAtomic(link, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := os.ReadFile(real)
+	if string(got) != "new" {
+		t.Errorf("content = %q", got)
+	}
+	if fi, _ := os.Lstat(link); fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("symlink was replaced by a regular file")
+	}
+	if fi, _ := os.Stat(real); fi.Mode().Perm() != 0640 {
+		t.Errorf("mode = %v, want the existing 0640 kept", fi.Mode().Perm())
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 2 {
+		t.Errorf("temp file left behind: %v", entries)
+	}
+}
+
+func TestRedactConnString(t *testing.T) {
+	cases := map[string]string{
+		"postgres://postgres:s3cret@db:5432/postgres?sslmode=disable": "postgres://postgres:REDACTED@db:5432/postgres?sslmode=disable",
+		"mariadb://root:p@ss/w:rd@db:3306/":                           "mariadb://root:REDACTED@db:3306/",
+		"mongodb://admin:pw@m1:27017,m2:27017/admin":                  "mongodb://admin:REDACTED@m1:27017,m2:27017/admin",
+		"postgres://db:5432/postgres":                                 "postgres://db:5432/postgres",
+	}
+	for in, want := range cases {
+		if got := redactConnString(in); got != want {
+			t.Errorf("redactConnString(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// apiDo sends an authenticated JSON request to a fresh admin handler.
+func apiDo(t *testing.T, path, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.SetBasicAuth("admin", "secret")
+	w := httptest.NewRecorder()
+	newAdminHandler(path).ServeHTTP(w, req)
+	return w
+}
+
+const apiHardeningConfig = `{"servers":[
+  {"name":"Main PG","root_connection_string":"postgres://postgres:s3cret@db:5432/postgres","databases":[{"database":"app","user":"app","password":"pw"}]},
+  {"name":"Maria","root_connection_string":"mariadb://root:s3cret@m:3306/","databases":[]}]}`
+
+func TestAPI_NeverReturnsRootPassword(t *testing.T) {
+	path := makeTestConfig(t, apiHardeningConfig)
+	for _, target := range []string{"/api/servers", "/api/servers/0"} {
+		w := apiDo(t, path, "GET", target, "")
+		if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "s3cret") {
+			t.Errorf("GET %s: code=%d, body leaks the root password: %s", target, w.Code, w.Body.String())
+		}
+	}
+	// Writing the redacted string back must not replace the real password.
+	w := apiDo(t, path, "PATCH", "/api/servers/0", `{"root_connection_string":"postgres://postgres:REDACTED@db:5432/postgres"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("PATCH with placeholder: code=%d, want 400", w.Code)
+	}
+}
+
+func TestAPI_RejectsUnsafeInput(t *testing.T) {
+	path := makeTestConfig(t, apiHardeningConfig)
+	cases := []struct{ method, target, body string }{
+		{"POST", "/api/servers/0/databases", `{"database":"a\"; DROP DATABASE app; --","user":"u"}`},
+		{"POST", "/api/servers/0/databases", `{"database":"../../etc","user":"u"}`},
+		{"POST", "/api/servers/0/databases", `{"database":"app","user":"other"}`}, // duplicate
+		{"POST", "/api/servers/0/databases", `{"database":"new","user":"u","permissions":["SELECT"]}`},
+		{"POST", "/api/servers/1/databases", `{"database":"new","user":"u","permissions":["ALL ON *.* TO x; --"]}`},
+		{"PATCH", "/api/servers/0/databases/0", `{"user":"u'; --"}`},
+		{"PATCH", "/api/servers/0/databases/0", `{"extensions":["x\"; DROP"]}`},
+		{"POST", "/api/servers", `{"name":"main pg","root_connection_string":"postgres://a:b@c/d"}`}, // same slug
+		{"PATCH", "/api/servers/1", `{"name":"Main-PG"}`},
+		{"PATCH", "/api/servers/1", `{"name":"  "}`},
+	}
+	before, _ := os.ReadFile(path)
+	for _, c := range cases {
+		if w := apiDo(t, path, c.method, c.target, c.body); w.Code != http.StatusBadRequest {
+			t.Errorf("%s %s %s: code=%d, want 400", c.method, c.target, c.body, w.Code)
+		}
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Error("a rejected request changed the config file")
+	}
+	// MariaDB does take table privileges.
+	if w := apiDo(t, path, "POST", "/api/servers/1/databases", `{"database":"new","user":"u","password":"p","permissions":["SELECT","CREATE VIEW"]}`); w.Code != http.StatusCreated {
+		t.Errorf("valid MariaDB create: code=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHealthz_NoAuth(t *testing.T) {
+	t.Setenv("ADMIN_USER", "admin")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+	w := httptest.NewRecorder()
+	newAdminHandler(makeTestConfig(t, apiHardeningConfig)).ServeHTTP(w, httptest.NewRequest("GET", "/healthz", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("code=%d, want 200 without credentials", w.Code)
 	}
 }

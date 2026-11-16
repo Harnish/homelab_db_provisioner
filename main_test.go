@@ -156,3 +156,83 @@ func TestConfig_MigrateConfigAbsent(t *testing.T) {
 		t.Errorf("absent migrate should be omitted: %s", out)
 	}
 }
+
+func TestValidateDatabaseConfig(t *testing.T) {
+	ok := DatabaseConfig{Database: "app_db", User: "app-user.1"}
+	cases := []struct {
+		name    string
+		dbType  DBType
+		mutate  func(*DatabaseConfig)
+		wantErr bool
+	}{
+		{"plain", PostgreSQL, func(*DatabaseConfig) {}, false},
+		{"digit first", PostgreSQL, func(d *DatabaseConfig) { d.Database = "2fauth" }, false},
+		{"empty database", PostgreSQL, func(d *DatabaseConfig) { d.Database = "" }, true},
+		{"double quote", PostgreSQL, func(d *DatabaseConfig) { d.Database = `a"; DROP DATABASE x; --` }, true},
+		{"backtick", MariaDB, func(d *DatabaseConfig) { d.Database = "a`b" }, true},
+		{"path traversal", PostgreSQL, func(d *DatabaseConfig) { d.Database = "../etc" }, true},
+		{"slash", PostgreSQL, func(d *DatabaseConfig) { d.Database = "a/b" }, true},
+		{"quote in user", MariaDB, func(d *DatabaseConfig) { d.User = "a'b" }, true},
+		{"too long", PostgreSQL, func(d *DatabaseConfig) { d.User = strings.Repeat("a", 64) }, true},
+		{"pg database privilege", PostgreSQL, func(d *DatabaseConfig) { d.Permissions = []string{"connect", "TEMPORARY"} }, false},
+		{"pg table privilege", PostgreSQL, func(d *DatabaseConfig) { d.Permissions = []string{"SELECT"} }, true},
+		{"mariadb table privilege", MariaDB, func(d *DatabaseConfig) { d.Permissions = []string{"SELECT", "CREATE VIEW"} }, false},
+		{"permission injection", MariaDB, func(d *DatabaseConfig) { d.Permissions = []string{"SELECT ON *.* TO x; --"} }, true},
+		{"extension", PostgreSQL, func(d *DatabaseConfig) { d.Extensions = []string{"uuid-ossp", "pg_trgm"} }, false},
+		{"extension injection", PostgreSQL, func(d *DatabaseConfig) { d.Extensions = []string{`x"; DROP`} }, true},
+	}
+	for _, c := range cases {
+		db := ok
+		c.mutate(&db)
+		if err := validateDatabaseConfig(c.dbType, db); (err != nil) != c.wantErr {
+			t.Errorf("%s: err=%v, wantErr=%v", c.name, err, c.wantErr)
+		}
+	}
+}
+
+func TestQuoting(t *testing.T) {
+	if got := quoteIdentifier(`a"b`); got != `"a""b"` {
+		t.Errorf("quoteIdentifier: %s", got)
+	}
+	if got := mysqlIdentifier("a`b"); got != "`a``b`" {
+		t.Errorf("mysqlIdentifier: %s", got)
+	}
+	if got := mysqlLiteral(`it's\`); got != `'it''s\\'` {
+		t.Errorf("mysqlLiteral: %s", got)
+	}
+}
+
+func TestMariaDBDSN(t *testing.T) {
+	cases := map[string]string{
+		"mariadb://root:pw@db:3306/":                "root:pw@tcp(db:3306)/",
+		"mysql://root:p@ss@db:3306/app?parseTime=1": "root:p@ss@tcp(db:3306)/app?parseTime=1",
+		"mariadb://root:pw@db/":                     "root:pw@tcp(db:3306)/",
+		"mariadb://root:pw@db:3306":                 "root:pw@tcp(db:3306)/",
+	}
+	for in, want := range cases {
+		got, err := mariaDBDSN(in)
+		if err != nil || got != want {
+			t.Errorf("mariaDBDSN(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err := mariaDBDSN("mariadb://db:3306/"); err == nil {
+		t.Error("expected error for connection string without credentials")
+	}
+}
+
+// The example configs are what a new user copies first; they must validate.
+func TestExampleConfigsValidate(t *testing.T) {
+	for _, path := range []string{"config.json", "config-multi.json"} {
+		cfg, err := loadConfigFile(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		for _, s := range cfg.Servers {
+			for _, db := range s.Databases {
+				if err := validateDatabaseConfig(detectDBType(s.RootConnectionString), db); err != nil {
+					t.Errorf("%s: %s/%s: %v", path, s.Name, db.Database, err)
+				}
+			}
+		}
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -84,8 +85,11 @@ func detectDBType(connStr string) DBType {
 	return PostgreSQL
 }
 
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
-	log.Println("Database Provisioner starting (PostgreSQL, MariaDB, MongoDB)...")
+	log.Printf("Database Provisioner %s starting (PostgreSQL, MariaDB, MongoDB)...", version)
 
 	if os.Getenv("ADMIN_SITE") == "true" {
 		adminUser := os.Getenv("ADMIN_USER")
@@ -118,6 +122,8 @@ func runOnce() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// An unreachable server exits non-zero (after the reachable ones were
+	// provisioned) so a Kubernetes Job or systemd unit retries or reports it.
 	if err := processConfig(config); err != nil {
 		log.Fatalf("Failed to process config: %v", err)
 	}
@@ -130,7 +136,9 @@ func runWatchMode() {
 
 	configPath := getConfigPath()
 	var lastModTime time.Time
+	var retryAt time.Time // set when a server was unreachable
 	checkInterval := 10 * time.Second
+	retryInterval := 60 * time.Second
 
 	for {
 		fileInfo, err := os.Stat(configPath)
@@ -142,9 +150,15 @@ func runWatchMode() {
 
 		currentModTime := fileInfo.ModTime()
 
-		if currentModTime.After(lastModTime) {
-			log.Println("Config file changed, reprocessing...")
+		changed := currentModTime.After(lastModTime)
+		if changed || (!retryAt.IsZero() && time.Now().After(retryAt)) {
+			if changed {
+				log.Println("Config file changed, reprocessing...")
+			} else {
+				log.Println("Retrying servers that were unreachable...")
+			}
 			lastModTime = currentModTime
+			retryAt = time.Time{}
 
 			configMu.RLock()
 			config, err := loadConfig()
@@ -157,6 +171,9 @@ func runWatchMode() {
 
 			if err := processConfig(config); err != nil {
 				log.Printf("Failed to process config: %v", err)
+				if errors.Is(err, errServerUnreachable) {
+					retryAt = time.Now().Add(retryInterval)
+				}
 			} else {
 				log.Println("Config processed successfully")
 			}
@@ -237,26 +254,10 @@ func processConfig(config *Config) error {
 	}
 	log.Println("========================================")
 
-	// Migration pass — runs before normal provisioning so the backup fallback
-	// works even when the source server's root connection is dead.
-	for si, server := range config.Servers {
-		if detectDBType(server.RootConnectionString) != PostgreSQL {
-			continue
-		}
-		for di, dbConfig := range server.Databases {
-			if dbConfig.Migrate == nil || dbConfig.Migrate.Completed {
-				continue
-			}
-			if server.DryRun {
-				log.Printf("[DRY RUN] would migrate %s/%s to %s (confirm_drop=%v)",
-					server.Name, dbConfig.Database, dbConfig.Migrate.TargetServer, dbConfig.Migrate.ConfirmDrop)
-				continue
-			}
-			runMigration(config, si, server, di, dbConfig, getConfigPath())
-		}
-	}
+	migrationPass(config)
 
 	// Process each server
+	unreachable := 0
 	for serverIdx, server := range config.Servers {
 		serverName := server.Name
 		if serverName == "" {
@@ -285,22 +286,11 @@ func processConfig(config *Config) error {
 			// Convert mariadb:// or mysql:// format to go-sql-driver/mysql DSN format
 			// Expected input format: mysql://user:password@host:port/dbname
 			// Expected output format: user:password@tcp(host:port)/dbname
-			connStr = server.RootConnectionString
-			connStr = strings.TrimPrefix(connStr, "mariadb://")
-			connStr = strings.TrimPrefix(connStr, "mysql://")
-
-			// Split by / to separate credentials+host from database name
-			parts := strings.Split(connStr, "/")
-			if len(parts) >= 2 {
-				credHostPart := parts[0] // user:password@host:port
-				dbName := parts[1]       // database name
-				// Add @tcp() wrapper around the host:port part
-				if strings.Contains(credHostPart, "@") {
-					credAndHost := strings.Split(credHostPart, "@")
-					credentials := credAndHost[0] // user:password
-					hostPort := credAndHost[1]    // host:port
-					connStr = credentials + "@tcp(" + hostPort + ")/" + dbName
-				}
+			var dsnErr error
+			if connStr, dsnErr = mariaDBDSN(server.RootConnectionString); dsnErr != nil {
+				log.Printf("Invalid MariaDB connection string for %s: %v", serverName, dsnErr)
+				log.Printf("Skipping server: %s", serverName)
+				continue
 			}
 
 			log.Printf("Detected MariaDB/MySQL connection for %s", serverName)
@@ -340,6 +330,10 @@ func processConfig(config *Config) error {
 				created, provErr := provisionMongoDB(server.RootConnectionString, dbConfig, server.DryRun)
 				if provErr != nil {
 					log.Printf("Failed to provision MongoDB database %s on %s: %v", dbConfig.Database, serverName, provErr)
+					if errors.Is(provErr, errServerUnreachable) {
+						unreachable++
+						break
+					}
 					continue
 				}
 
@@ -367,6 +361,7 @@ func processConfig(config *Config) error {
 		if err != nil {
 			log.Printf("Failed to connect to %s: %v", serverName, err)
 			log.Printf("Skipping server: %s", serverName)
+			unreachable++
 			continue
 		}
 
@@ -422,7 +417,43 @@ func processConfig(config *Config) error {
 	log.Printf("All servers processed")
 	log.Printf("========================================")
 
+	if unreachable > 0 {
+		return fmt.Errorf("%d %w", unreachable, errServerUnreachable)
+	}
 	return nil
+}
+
+// errServerUnreachable marks a processConfig pass that skipped a server it
+// couldn't connect to. Watch mode retries; the rest of the pass still ran.
+var errServerUnreachable = errors.New("server(s) unreachable")
+
+func migrationPass(config *Config) {
+	// Migration pass — runs before normal provisioning so the backup fallback
+	// works even when the source server's root connection is dead.
+	for si, server := range config.Servers {
+		if detectDBType(server.RootConnectionString) != PostgreSQL {
+			continue
+		}
+		for di, dbConfig := range server.Databases {
+			if dbConfig.Migrate == nil || dbConfig.Migrate.Completed {
+				continue
+			}
+			// A failed migration waits for the operator to fix the cause and
+			// schedule it again; retrying on every pass would loop, since
+			// recording the failure itself rewrites the config file.
+			if dbConfig.Migrate.Error != "" {
+				log.Printf("migrate: %s/%s -> %s failed earlier, not retrying until rescheduled: %s",
+					server.Name, dbConfig.Database, dbConfig.Migrate.TargetServer, dbConfig.Migrate.Error)
+				continue
+			}
+			if server.DryRun {
+				log.Printf("[DRY RUN] would migrate %s/%s to %s (confirm_drop=%v)",
+					server.Name, dbConfig.Database, dbConfig.Migrate.TargetServer, dbConfig.Migrate.ConfirmDrop)
+				continue
+			}
+			runMigration(config, si, server, di, dbConfig, getConfigPath())
+		}
+	}
 }
 
 func logDryRunK8sSecret(db DatabaseConfig, serverName string) {
@@ -470,6 +501,10 @@ func connectWithRetry(driverName, connStr string, maxRetries int, delay time.Dur
 func provisionPostgreSQL(db *sql.DB, rootConnStr string, config DatabaseConfig, dryRun bool) (bool, error) {
 	ctx := context.Background()
 
+	if err := validateDatabaseConfig(PostgreSQL, config); err != nil {
+		return false, err
+	}
+
 	// Check if user exists
 	userExists, err := checkPostgreSQLUserExists(ctx, db, config.User)
 	if err != nil {
@@ -479,14 +514,12 @@ func provisionPostgreSQL(db *sql.DB, rootConnStr string, config DatabaseConfig, 
 	// Create user if it doesn't exist
 	if !userExists {
 		log.Printf("Creating user: %s", config.User)
-		createUserSQL := fmt.Sprintf("CREATE USER %s WITH PASSWORD '%s'",
-			quoteIdentifier(config.User),
-			escapeString(config.Password))
+		createUserSQL := fmt.Sprintf("CREATE USER %s WITH PASSWORD ", quoteIdentifier(config.User))
 
 		if dryRun {
-			log.Printf("[DRY RUN] Would execute: %s", createUserSQL)
+			log.Printf("[DRY RUN] Would execute: %s%s", createUserSQL, redactedLiteral)
 		} else {
-			if _, err := db.ExecContext(ctx, createUserSQL); err != nil {
+			if _, err := db.ExecContext(ctx, createUserSQL+pq.QuoteLiteral(config.Password)); err != nil {
 				return false, fmt.Errorf("failed to create user: %w", err)
 			}
 			log.Printf("User %s created successfully", config.User)
@@ -494,14 +527,12 @@ func provisionPostgreSQL(db *sql.DB, rootConnStr string, config DatabaseConfig, 
 	} else {
 		log.Printf("User %s already exists", config.User)
 		// Update password if user exists
-		updatePasswordSQL := fmt.Sprintf("ALTER USER %s WITH PASSWORD '%s'",
-			quoteIdentifier(config.User),
-			escapeString(config.Password))
+		updatePasswordSQL := fmt.Sprintf("ALTER USER %s WITH PASSWORD ", quoteIdentifier(config.User))
 
 		if dryRun {
-			log.Printf("[DRY RUN] Would execute: %s", updatePasswordSQL)
+			log.Printf("[DRY RUN] Would execute: %s%s", updatePasswordSQL, redactedLiteral)
 		} else {
-			if _, err := db.ExecContext(ctx, updatePasswordSQL); err != nil {
+			if _, err := db.ExecContext(ctx, updatePasswordSQL+pq.QuoteLiteral(config.Password)); err != nil {
 				return false, fmt.Errorf("failed to update user password: %w", err)
 			}
 			log.Printf("Password updated for user %s", config.User)
@@ -620,6 +651,10 @@ func provisionPostgreSQLExtensions(ctx context.Context, rootConnStr, dbName stri
 func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, error) {
 	ctx := context.Background()
 
+	if err := validateDatabaseConfig(MariaDB, config); err != nil {
+		return false, err
+	}
+
 	// Check if database exists before creating
 	dbExists, err := checkMariaDBDatabaseExists(ctx, db, config.Database)
 	if err != nil {
@@ -628,8 +663,8 @@ func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, err
 
 	// Create database if it doesn't exist
 	log.Printf("Creating database if not exists: %s", config.Database)
-	createDbSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
-		config.Database)
+	createDbSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+		mysqlIdentifier(config.Database))
 
 	if dryRun {
 		log.Printf("[DRY RUN] Would execute: %s", createDbSQL)
@@ -648,14 +683,12 @@ func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, err
 	if !userExists {
 		// Create user
 		log.Printf("Creating user: %s", config.User)
-		createUserSQL := fmt.Sprintf("CREATE USER '%s'@'%%' IDENTIFIED BY '%s'",
-			escapeString(config.User),
-			escapeString(config.Password))
+		createUserSQL := fmt.Sprintf("CREATE USER %s@'%%' IDENTIFIED BY ", mysqlLiteral(config.User))
 
 		if dryRun {
-			log.Printf("[DRY RUN] Would execute: %s", createUserSQL)
+			log.Printf("[DRY RUN] Would execute: %s%s", createUserSQL, redactedLiteral)
 		} else {
-			if _, err := db.ExecContext(ctx, createUserSQL); err != nil {
+			if _, err := db.ExecContext(ctx, createUserSQL+mysqlLiteral(config.Password)); err != nil {
 				return false, fmt.Errorf("failed to create user: %w", err)
 			}
 			log.Printf("User %s created successfully", config.User)
@@ -663,14 +696,12 @@ func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, err
 	} else {
 		log.Printf("User %s already exists, updating password", config.User)
 		// Update password
-		updatePasswordSQL := fmt.Sprintf("ALTER USER '%s'@'%%' IDENTIFIED BY '%s'",
-			escapeString(config.User),
-			escapeString(config.Password))
+		updatePasswordSQL := fmt.Sprintf("ALTER USER %s@'%%' IDENTIFIED BY ", mysqlLiteral(config.User))
 
 		if dryRun {
-			log.Printf("[DRY RUN] Would execute: %s", updatePasswordSQL)
+			log.Printf("[DRY RUN] Would execute: %s%s", updatePasswordSQL, redactedLiteral)
 		} else {
-			if _, err := db.ExecContext(ctx, updatePasswordSQL); err != nil {
+			if _, err := db.ExecContext(ctx, updatePasswordSQL+mysqlLiteral(config.Password)); err != nil {
 				return false, fmt.Errorf("failed to update user password: %w", err)
 			}
 			log.Printf("Password updated for user %s", config.User)
@@ -682,15 +713,15 @@ func provisionMariaDB(db *sql.DB, config DatabaseConfig, dryRun bool) (bool, err
 	if len(config.Permissions) > 0 {
 		// Use explicit permissions if provided
 		permissionsStr := strings.Join(config.Permissions, ", ")
-		grantSQL = fmt.Sprintf("GRANT %s ON `%s`.* TO '%s'@'%%'",
+		grantSQL = fmt.Sprintf("GRANT %s ON %s.* TO %s@'%%'",
 			permissionsStr,
-			config.Database,
-			escapeString(config.User))
+			mysqlIdentifier(config.Database),
+			mysqlLiteral(config.User))
 	} else {
 		// Default to all privileges
-		grantSQL = fmt.Sprintf("GRANT ALL PRIVILEGES ON `%s`.* TO '%s'@'%%'",
-			config.Database,
-			escapeString(config.User))
+		grantSQL = fmt.Sprintf("GRANT ALL PRIVILEGES ON %s.* TO %s@'%%'",
+			mysqlIdentifier(config.Database),
+			mysqlLiteral(config.User))
 	}
 
 	if dryRun {
@@ -755,19 +786,69 @@ func checkMariaDBDatabaseExists(ctx context.Context, db *sql.DB, database string
 	return count > 0, err
 }
 
+// redactedLiteral stands in for a password in logged SQL.
+const redactedLiteral = "'***'"
+
 func quoteIdentifier(s string) string {
-	return fmt.Sprintf(`"%s"`, s)
+	return pq.QuoteIdentifier(s)
 }
 
-func escapeString(s string) string {
-	// Basic SQL string escaping - replace single quotes with two single quotes
-	result := ""
-	for _, c := range s {
-		if c == '\'' {
-			result += "''"
-		} else {
-			result += string(c)
+func mysqlIdentifier(s string) string {
+	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+}
+
+// mysqlLiteral quotes s as a MariaDB/MySQL string literal. Backslashes are
+// doubled because the default SQL mode treats them as escapes.
+// ponytail: wrong under sql_mode=NO_BACKSLASH_ESCAPES (a backslash in a
+// password is stored doubled); detect the mode if anyone runs that.
+func mysqlLiteral(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+var (
+	// Names also become backup directory names, so no path separators and
+	// no leading dot.
+	nameRe       = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_$.-]*$`)
+	extensionRe  = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	permissionRe = regexp.MustCompile(`^[A-Za-z]+( [A-Za-z]+)*$`)
+)
+
+// PostgreSQL only has these privileges at database level; table privileges
+// such as SELECT are rejected by GRANT ... ON DATABASE.
+var pgDatabasePrivileges = map[string]bool{
+	"CREATE": true, "CONNECT": true, "TEMPORARY": true, "TEMP": true,
+	"ALL": true, "ALL PRIVILEGES": true,
+}
+
+func validName(kind, s string) error {
+	if len(s) == 0 || len(s) > 63 || !nameRe.MatchString(s) {
+		return fmt.Errorf("invalid %s name %q: use 1-63 characters from letters, digits, _ $ . - and do not start with . $ or -", kind, s)
+	}
+	return nil
+}
+
+// validateDatabaseConfig rejects names, permissions and extensions that can't
+// be used safely in SQL statements and backup paths.
+func validateDatabaseConfig(dbType DBType, db DatabaseConfig) error {
+	if err := validName("database", db.Database); err != nil {
+		return err
+	}
+	if err := validName("user", db.User); err != nil {
+		return err
+	}
+	for _, ext := range db.Extensions {
+		if !extensionRe.MatchString(ext) {
+			return fmt.Errorf("invalid extension name %q", ext)
 		}
 	}
-	return result
+	for _, p := range db.Permissions {
+		if !permissionRe.MatchString(p) {
+			return fmt.Errorf("invalid permission %q", p)
+		}
+		if dbType == PostgreSQL && !pgDatabasePrivileges[strings.ToUpper(p)] {
+			return fmt.Errorf("invalid permission %q: PostgreSQL databases only take CREATE, CONNECT, TEMPORARY or ALL (the user owns the database, so table privileges are implied)", p)
+		}
+	}
+	return nil
 }

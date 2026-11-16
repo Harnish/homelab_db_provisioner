@@ -414,7 +414,7 @@ func TestAddDatabase_Success(t *testing.T) {
 		"database":     {"newdb"},
 		"user":         {"newuser"},
 		"password":     {"newpass"},
-		"permissions":  {"SELECT, INSERT"},
+		"permissions":  {"CONNECT, TEMPORARY"},
 	}
 	req := httptest.NewRequest("POST", "/add-database", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -441,7 +441,7 @@ func TestAddDatabase_Success(t *testing.T) {
 	if added.Database != "newdb" || added.User != "newuser" || added.Password != "newpass" {
 		t.Errorf("unexpected database entry: %+v", added)
 	}
-	if len(added.Permissions) != 2 || added.Permissions[0] != "SELECT" || added.Permissions[1] != "INSERT" {
+	if len(added.Permissions) != 2 || added.Permissions[0] != "CONNECT" || added.Permissions[1] != "TEMPORARY" {
 		t.Errorf("unexpected permissions: %v", added.Permissions)
 	}
 }

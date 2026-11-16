@@ -3,12 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -44,46 +41,58 @@ func resolveTargetServer(config *Config, targetName, sourceName string) (Databas
 	return DatabaseServer{}, fmt.Errorf("target server %q not found", targetName)
 }
 
-func persistMigrate(configPath string, serverIdx, dbIdx int, m MigrateConfig) {
+// persistMigrate records m on the named database. The entry is looked up by
+// name, not index: a migration can run for minutes, and the admin UI may have
+// added or removed entries meanwhile.
+func persistMigrate(configPath, serverName, database string, m MigrateConfig) {
 	configMu.Lock()
 	defer configMu.Unlock()
 
-	data, err := os.ReadFile(configPath)
+	cfg, err := loadConfigFile(configPath)
 	if err != nil {
 		log.Printf("migrate: persist read %s: %v", configPath, err)
 		return
 	}
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		log.Printf("migrate: persist parse: %v", err)
-		return
+	for si := range cfg.Servers {
+		if cfg.Servers[si].Name != serverName {
+			continue
+		}
+		for di := range cfg.Servers[si].Databases {
+			d := &cfg.Servers[si].Databases[di]
+			if d.Database != database {
+				continue
+			}
+			if d.Migrate != nil && *d.Migrate == m {
+				return // unchanged; a write would only wake the watch loop
+			}
+			mc := m
+			d.Migrate = &mc
+			if err := saveConfigFile(configPath, cfg); err != nil {
+				log.Printf("migrate: persist write: %v", err)
+			}
+			return
+		}
 	}
-	if serverIdx < 0 || serverIdx >= len(cfg.Servers) {
-		return
-	}
-	if dbIdx < 0 || dbIdx >= len(cfg.Servers[serverIdx].Databases) {
-		return
-	}
-	mc := m
-	cfg.Servers[serverIdx].Databases[dbIdx].Migrate = &mc
-
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		log.Printf("migrate: persist marshal: %v", err)
-		return
-	}
-	if err := os.WriteFile(configPath, out, 0600); err != nil {
-		log.Printf("migrate: persist write: %v", err)
-	}
+	log.Printf("migrate: %s/%s no longer in config, result not recorded", serverName, database)
 }
 
 func runMigration(config *Config, serverIdx int, source DatabaseServer, dbIdx int, db DatabaseConfig, configPath string) {
 	m := *db.Migrate
+	var target DatabaseServer
+	targetCreated := false
 	fail := func(format string, args ...interface{}) {
 		m.Completed = false
 		m.Error = fmt.Sprintf(format, args...)
 		log.Printf("migrate: %s/%s: %s", source.Name, db.Database, m.Error)
-		persistMigrate(configPath, serverIdx, dbIdx, m)
+		// Remove the half-filled copy this run created, so a retry doesn't
+		// stop at "target database already exists".
+		if targetCreated {
+			if err := dropPostgreSQLDatabase(target.RootConnectionString, db.Database); err != nil {
+				log.Printf("migrate: %s/%s: could not remove incomplete copy on %s: %v", source.Name, db.Database, target.Name, err)
+				m.Error += fmt.Sprintf(" (the incomplete copy on %s could not be removed; drop it before retrying: %v)", target.Name, err)
+			}
+		}
+		persistMigrate(configPath, source.Name, db.Database, m)
 	}
 
 	target, err := resolveTargetServer(config, m.TargetServer, source.Name)
@@ -120,12 +129,12 @@ func runMigration(config *Config, serverIdx int, source DatabaseServer, dbIdx in
 		fail("target database %q already exists on %q, refusing to overwrite", db.Database, target.Name)
 		return
 	}
-	if _, err := provisionPostgreSQL(targetRoot, target.RootConnectionString, db, false); err != nil {
-		targetRoot.Close()
+	targetCreated, err = provisionPostgreSQL(targetRoot, target.RootConnectionString, db, false)
+	targetRoot.Close()
+	if err != nil {
 		fail("provision target: %v", err)
 		return
 	}
-	targetRoot.Close()
 
 	// Dump + restore.
 	fromBackup := false
@@ -177,7 +186,7 @@ func runMigration(config *Config, serverIdx int, source DatabaseServer, dbIdx in
 		}
 	}
 
-	persistMigrate(configPath, serverIdx, dbIdx, m)
+	persistMigrate(configPath, source.Name, db.Database, m)
 	log.Printf("migrate: %s/%s -> %s complete", source.Name, db.Database, target.Name)
 }
 
@@ -202,8 +211,8 @@ func migratePostgreSQLData(sourceConnStr, targetConnStr, database string) error 
 		return err
 	}
 
-	dump := exec.Command("pg_dump", "--no-password", src)
-	restore := exec.Command("psql", "--no-password", "--set", "ON_ERROR_STOP=0", tgt)
+	dump := pgCommand("pg_dump", src)
+	restore := pgCommand("psql", tgt, "--set", "ON_ERROR_STOP=0")
 
 	pipe, err := dump.StdoutPipe()
 	if err != nil {
@@ -234,7 +243,7 @@ func migratePostgreSQLData(sourceConnStr, targetConnStr, database string) error 
 func dropPostgreSQLDatabase(rootConnStr, database string) error {
 	conn, err := sql.Open("postgres", rootConnStr)
 	if err != nil {
-		return fmt.Errorf("open source: %w", err)
+		return fmt.Errorf("open: %w", err)
 	}
 	defer conn.Close()
 	stmt := fmt.Sprintf("DROP DATABASE %s WITH (FORCE)", quoteIdentifier(database))

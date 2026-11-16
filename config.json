@@ -19,7 +19,7 @@
           "database": "reporting_db",
           "user": "reporting_user",
           "password": "reportingpass789",
-          "permissions": ["SELECT", "INSERT", "UPDATE"]
+          "permissions": ["CONNECT", "TEMPORARY"]
         }
       ]
     }
