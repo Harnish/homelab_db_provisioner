@@ -1,0 +1,78 @@
+name: Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+        env:
+          GOTOOLCHAIN: auto
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: rootpassword
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      postgres-target:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: rootpassword
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: rootpassword
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mongo:
+        image: mongo:7
+        env:
+          MONGO_INITDB_ROOT_USERNAME: admin
+          MONGO_INITDB_ROOT_PASSWORD: rootpassword
+        ports: ['27017:27017']
+    env:
+      MIGRATE_SOURCE_CONN: postgres://postgres:rootpassword@localhost:5432/postgres?sslmode=disable
+      MIGRATE_TARGET_CONN: postgres://postgres:rootpassword@localhost:5433/postgres?sslmode=disable
+      TEST_MARIADB_CONN: mariadb://root:rootpassword@localhost:3306/
+      TEST_MONGO_CONN: mongodb://admin:rootpassword@127.0.0.1:27017/admin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+        env:
+          GOTOOLCHAIN: auto
+      # pg_dump must be at least as new as the newest server it dumps.
+      - name: Install PostgreSQL 18 client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-18
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+      - run: go test -tags integration ./...
